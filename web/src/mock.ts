@@ -43,11 +43,19 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     engine: 'local', language: 'auto', whisper_model: 'small', use_system: true, use_mic: true,
     live_transcript: true, summary_backend: 'auto', summary_prompt: '', device: 'auto', anthropic_key: '', openai_key: '',
     has_anthropic_key: false, has_openai_key: false, anthropic_key_source: '', openai_key_source: '',
-    whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
+    whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', version: 'dev', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
   }
   const brief = (n: Note) => ({ id: n.id, title: n.title, created: n.created, duration: n.duration, parts: n.parts })
   const ok = <T,>(data: T) => Promise.resolve({ ok: true as const, data })
   const find = (id: string) => notes.find((n) => n.id === id)!
+  // fake long-running tasks: finish after `ms`, or run `onCancel` when cancelled
+  const running = new Map<string, () => void>()
+  const start = (kind: string, id: string, ms: number, done: () => void, onCancel?: () => void) => {
+    const key = kind + ':' + id
+    const finish = () => { running.delete(key); emit('tasks', { id, tasks: [] }); emit('busy', false) }
+    const t = window.setTimeout(() => { done(); finish() }, ms)
+    running.set(key, () => { clearTimeout(t); onCancel?.(); emit('status', 'Cancelled'); finish() })
+  }
 
   return {
     list_notes: (q: string) => ok(notes.filter((n) => !q || (n.title + n.transcript + n.summary).toLowerCase().includes(q.toLowerCase())).map(brief)),
@@ -89,25 +97,32 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     },
     add_wav: () => ok(null),
     summarize: (id: string) => {
-      emit('busy', true); emit('status', 'Summarizing with Claude…')
-      setTimeout(() => { const n = find(id); n.summary = SUMMARY; n.summary_rev++; emit('summary', { id, markdown: SUMMARY, rev: n.summary_rev }); emit('busy', false); emit('status', 'Summary done.') }, 2600)
+      emit('busy', true); emit('tasks', { id, tasks: ['summary'] }); emit('status', 'Summarizing with Claude…')
+      start('summary', id, 2600, () => { const n = find(id); n.summary = SUMMARY; n.summary_rev++; emit('summary', { id, markdown: SUMMARY, rev: n.summary_rev }); emit('status', 'Summary done.') },
+        () => emit('summary', { id, markdown: null }))
       return ok(true)
     },
     retranscribe: (id: string) => {
-      emit('busy', true); emit('status', 'Refining transcript…')
-      setTimeout(() => { const t = LINES.join('\n') + '\n'; const n = find(id); n.transcript = t; n.transcript_rev++; emit('transcript', { id, text: t, rev: n.transcript_rev }); emit('busy', false); emit('status', 'Transcript refined.') }, 2200)
+      emit('busy', true); emit('tasks', { id, tasks: ['refine'] }); emit('status', 'Refining transcript…')
+      start('refine', id, 2200, () => { const t = LINES.join('\n') + '\n'; const n = find(id); n.transcript = t; n.transcript_rev++; emit('transcript', { id, text: t, rev: n.transcript_rev }); emit('status', 'Transcript refined.') })
+      return ok(true)
+    },
+    cancel: (kind: string, id: string) => {
+      const t = running.get(kind + ':' + id)
+      if (!t) return ok(false)
+      t()
       return ok(true)
     },
     review: (id: string, transcript: string) => {
-      emit('busy', true); emit('status', 'Checking transcript for garbled words…')
-      setTimeout(() => {
+      emit('busy', true); emit('tasks', { id, tasks: ['review'] }); emit('status', 'Checking transcript for garbled words…')
+      start('review', id, 1800, () => {
         const items = [
           { original: 'Android 9', options: ['Android 9', 'Android 10'], reason: 'maybe a different version', before: 'Carol: Do we need to support ', after: '?' },
           { original: 'by Thursday', options: ['by this Thursday', 'before Thursday'], reason: 'ambiguous deadline', before: 'login still has a bug, I will fix it ', after: '.' },
           { original: 'two more testers', options: ['2 more testers', 'two more test engineers', 'two more testing teams'], reason: 'similar sounding', before: 'Budget is approved for ', after: '.' },
         ].filter((i) => transcript.includes(i.original))
-        emit('review', { id, items }); emit('busy', false); emit('status', 'Found ' + items.length + ' phrase(s) to check.')
-      }, 1800)
+        emit('review', { id, items }); emit('status', 'Found ' + items.length + ' phrase(s) to check.')
+      }, () => emit('review', { id, items: null }))
       return ok(true)
     },
     get_settings: () => ok({ ...settings }),

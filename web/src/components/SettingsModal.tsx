@@ -180,7 +180,9 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
           />
         </div>
 
-        <div className="flex justify-end gap-2 pt-1">
+        <div className="flex items-center gap-2 pt-1">
+          <span className="text-[12px] text-mute">ScribSalmon v{settings?.version ?? 'dev'}</span>
+          <div className="flex-1" />
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
@@ -191,7 +193,7 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
                 const patch: Record<string, unknown> = {}
                 for (const k of Object.keys(d) as (keyof Settings)[]) {
                   if (k === 'anthropic_key' || k === 'openai_key') continue
-                  if (k === 'default_prompt' || k.startsWith('has_') || k.endsWith('_source')) continue
+                  if (k === 'default_prompt' || k === 'version' || k.startsWith('has_') || k.endsWith('_source')) continue
                   if (d[k] !== settings?.[k]) patch[k] = d[k]
                 }
                 if (d.anthropic_key.trim()) patch.anthropic_key = d.anthropic_key.trim()
