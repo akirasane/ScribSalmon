@@ -1,7 +1,13 @@
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+
+from . import dpapi
+from .fsutil import atomic_write_text
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "ScribSalmon"
 LEGACY_NAME = "VoiceRecog"  # previous name of this app; its folders are moved over once
@@ -50,17 +56,40 @@ class Settings:
     def effective_openai_key(self) -> str:
         return self.openai_key or os.environ.get("OPENAI_API_KEY", "")
 
+    def __post_init__(self):
+        self._unreadable: set = set()  # secrets whose stored dpapi blob could not be decrypted
+        self._raw: dict = {}  # original blobs of those secrets, written back unchanged on save
+
+    @classmethod
+    def _read_json(cls, path: Path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
     @classmethod
     def load(cls) -> "Settings":
         s = cls()
         migrate = False
-        try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for k, v in coerce_patch(data, False).items():
-                    setattr(s, k, v)
-        except (OSError, ValueError):
-            pass
+        data = cls._read_json(SETTINGS_FILE)
+        if data is None:
+            data = cls._read_json(_bak_path())
+        if data is not None:
+            for k, v in data.items():
+                if k in SECRETS and isinstance(v, str) and v:
+                    if v.startswith("dpapi:"):
+                        try:
+                            data[k] = dpapi.unprotect(v)
+                        except Exception as e:  # noqa: BLE001 - any failure means "can't read it"
+                            log.warning("Cannot decrypt saved %s: %s", k, e)
+                            data[k] = ""
+                            s._unreadable.add(k)
+                            s._raw[k] = v
+                    elif dpapi.available():
+                        migrate = True  # legacy plaintext: re-save encrypted
+            for k, v in coerce_patch(data, False).items():
+                setattr(s, k, v)
         # older versions persisted env-var keys into settings.json; drop those copies
         for attr, env in (("anthropic_key", "ANTHROPIC_API_KEY"), ("openai_key", "OPENAI_API_KEY")):
             v = getattr(s, attr)
@@ -74,9 +103,59 @@ class Settings:
                 pass
         return s
 
+    def _serialize(self) -> str:
+        d = asdict(self)
+        for k in SECRETS:
+            v = d[k]
+            if not v:
+                if k in self._unreadable and k in self._raw:
+                    d[k] = self._raw[k]  # keep the undecryptable blob rather than destroying it
+                continue
+            self._unreadable.discard(k)  # user supplied a new value
+            self._raw.pop(k, None)
+            try:
+                d[k] = dpapi.protect(v)
+            except Exception as e:  # noqa: BLE001 - e.g. non-Windows: fall back to plaintext, never crash
+                log.warning("Could not encrypt %s, saving as plain text: %s", k, e)
+        return json.dumps(d, indent=2)
+
     def save(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        text = self._serialize()
+        cur = None
+        try:
+            cur = SETTINGS_FILE.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        atomic_write_text(SETTINGS_FILE, text)
+        # .bak: last good file; never contains a plaintext secret
+        try:
+            if _has_plaintext_secret(text):
+                return
+            if cur is not None and _is_json_dict(cur):
+                atomic_write_text(_bak_path(), text if _has_plaintext_secret(cur) else cur)
+        except OSError as e:
+            log.warning("Could not write settings backup: %s", e)
+
+
+def _bak_path() -> Path:
+    return SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".bak")
+
+
+def _is_json_dict(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except ValueError:
+        return False
+
+
+def _has_plaintext_secret(text: str) -> bool:
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(d, dict) and any(
+        isinstance(d.get(k), str) and d[k] and not d[k].startswith("dpapi:") for k in SECRETS)
 
 
 ENUMS = {"engine": {"local", "openai"}, "language": {"auto", "th", "en"},

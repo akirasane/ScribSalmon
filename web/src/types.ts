@@ -37,8 +37,8 @@ export interface Settings {
   openai_key: string
   has_anthropic_key: boolean
   has_openai_key: boolean
-  anthropic_key_source: 'saved' | 'env' | ''
-  openai_key_source: 'saved' | 'env' | ''
+  anthropic_key_source: 'saved' | 'env' | 'unreadable' | ''
+  openai_key_source: 'saved' | 'env' | 'unreadable' | ''
   claude_model: string
   default_prompt: string
 }

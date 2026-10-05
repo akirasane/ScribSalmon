@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+from .fsutil import atomic_write_text
 from .settings import SESSIONS_DIR
 
 
@@ -62,16 +63,16 @@ class Session:
             return ""
 
     def write(self, name: str, text: str) -> None:
-        (self.dir / name).write_text(text, encoding="utf-8")
+        atomic_write_text(self.dir / name, text)
 
     def append(self, name: str, text: str) -> None:
         cur = self.read(name)
         self.write(name, (cur + "\n" if cur and not cur.endswith("\n") else cur) + text + "\n")
 
     def save_meta(self) -> None:
-        (self.dir / "meta.json").write_text(
-            json.dumps({"title": self.title, "created": self.created.isoformat()}, ensure_ascii=False),
-            encoding="utf-8")
+        atomic_write_text(
+            self.dir / "meta.json",
+            json.dumps({"title": self.title, "created": self.created.isoformat()}, ensure_ascii=False))
 
 
 def create() -> Session:
@@ -118,9 +119,3 @@ def delete(s: Session) -> None:
         raise ValueError("Refusing to delete outside the notes folder.")
     shutil.rmtree(r)
 
-
-def fmt_duration(sec: float) -> str:
-    sec = int(sec)
-    h, r = divmod(sec, 3600)
-    m, s = divmod(r, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
