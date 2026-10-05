@@ -24,6 +24,9 @@ for pkg in REQUIRED:
     binaries += b
     hiddenimports += h
 
+# app modules that are only reached dynamically (selftest imports them by name) must still be bundled
+hiddenimports += ["app.updater"]
+
 
 def _write_version_info() -> str:
     """PyInstaller version resource (file/product version shown in Explorer) generated from VERSION."""
