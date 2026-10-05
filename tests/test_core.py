@@ -203,3 +203,15 @@ def test_import_wav_validates_before_queueing(ctl, monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="Unsupported"):
         c.import_wav(nid, str(tmp_path / "x.mp3"))
     assert not c._pending
+
+
+def test_list_notes_search_uses_cached_matches(data_dirs):
+    from app import core, sessions
+
+    c = core.Controller(lambda *a: None)
+    n = c.create_note()
+    s = sessions.load(sessions.SESSIONS_DIR / n["id"])
+    s.write("transcript.txt", "hello budget meeting\n")
+    assert [x["id"] for x in c.list_notes("budget")] == [n["id"]]
+    assert c.list_notes("nonexistent-term") == []
+    assert len(c.list_notes("")) == 1

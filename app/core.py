@@ -208,13 +208,10 @@ class Controller:
 
     # ---------------------------------------------------------------- notes
     def list_notes(self, query: str = "") -> list:
-        q = (query or "").strip().lower()
         out = []
         for s in sessions.list_all():
-            if q and q not in s.title.lower() and q not in s.read("transcript.txt").lower() \
-                    and q not in s.read("summary.md").lower():
-                continue
-            out.append(self._brief(s))
+            if s.matches(query):  # cached per file mtime/size, so typing in the search box stays cheap
+                out.append(self._brief(s))
         return out
 
     def get_note(self, note_id: str) -> dict:
