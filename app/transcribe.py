@@ -1,4 +1,5 @@
 """Pluggable speech-to-text engines."""
+import gc
 import io
 import re
 import wave
@@ -40,15 +41,66 @@ class Engine(ABC):
         one line per segment) instead of a short live chunk."""
 
 
-class LocalWhisper(Engine):
-    def __init__(self, model_name: str):
-        from faster_whisper import WhisperModel  # lazy: slow import + model download
+def _cuda_count() -> int:
+    try:
         import ctranslate2
-        gpu = ctranslate2.get_cuda_device_count() > 0
-        self.model = WhisperModel(model_name, device="cuda" if gpu else "cpu",
-                                  compute_type="float16" if gpu else "int8")
+        return int(ctranslate2.get_cuda_device_count())
+    except Exception:
+        return 0
+
+
+_CUDA_ERR = re.compile(r"cuda|cublas|cudnn", re.I)
+
+
+class LocalWhisper(Engine):
+    def __init__(self, model_name: str, device: str = "auto"):
+        device = (device or "auto").strip().lower()
+        if device not in ("auto", "cpu", "cuda"):
+            device = "auto"
+        self.model_name = model_name
+        self.requested = device
+        self.fallback_reason: Optional[str] = None
+        self.model = None
+        self.device = "cpu"
+        want = "cuda" if device == "cuda" or (device == "auto" and _cuda_count() > 0) else "cpu"
+        if want == "cuda":
+            try:
+                self._load("cuda", "float16")
+                self._warmup()
+            except Exception as e:
+                if device == "cuda":
+                    raise RuntimeError(f"CUDA requested but not usable: {e}") from e
+                self.fallback_reason = str(e)
+                self.model = None
+                gc.collect()
+                self._load("cpu", "int8")
+        else:
+            self._load("cpu", "int8")
+
+    def _load(self, dev: str, compute: str):
+        from faster_whisper import WhisperModel  # lazy: slow import + model download
+        self.model = WhisperModel(self.model_name, device=dev, compute_type=compute)
+        self.device = dev
+
+    def _warmup(self):
+        segs, _ = self.model.transcribe(np.zeros(SAMPLE_RATE, np.float32), language="en", beam_size=1,
+                                        vad_filter=False, without_timestamps=True,
+                                        condition_on_previous_text=False)
+        list(segs)
 
     def transcribe(self, audio, language, prompt=None, long_form=False):
+        try:
+            return self._transcribe(audio, language, prompt, long_form)
+        except RuntimeError as e:
+            if self.device == "cuda" and self.requested == "auto" and _CUDA_ERR.search(str(e)):
+                self.fallback_reason = str(e)
+                self.model = None
+                gc.collect()
+                self._load("cpu", "int8")
+                return self._transcribe(audio, language, prompt, long_form)
+            raise
+
+    def _transcribe(self, audio, language, prompt=None, long_form=False):
         if is_silent(audio):
             return ""
         audio = normalize(audio)
@@ -101,8 +153,9 @@ class OpenAIWhisper(Engine):
 
 def make_engine(settings) -> Engine:
     if settings.engine == "openai":
-        return OpenAIWhisper(settings.openai_key)
-    return LocalWhisper((settings.whisper_custom or "").strip() or settings.whisper_model)
+        return OpenAIWhisper(getattr(settings, "effective_openai_key", None) or settings.openai_key)
+    return LocalWhisper((settings.whisper_custom or "").strip() or settings.whisper_model,
+                        getattr(settings, "device", "auto"))
 
 
 def load_wav(path) -> np.ndarray:

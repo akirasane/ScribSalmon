@@ -1,5 +1,4 @@
-import type { Note, NoteBrief, RecState, Settings } from './types'
-import { createMock } from './mock'
+import type { Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch } from './types'
 
 type Res<T> = { ok: true; data: T } | { ok: false; error: string }
 type Listener = (payload: any) => void
@@ -8,6 +7,7 @@ declare global {
   interface Window {
     pywebview?: { api: Record<string, (...a: any[]) => Promise<Res<any>>> }
     __pyEmit?: (name: string, payload: unknown) => void
+    __flushNow?: () => Promise<void>
   }
 }
 
@@ -26,20 +26,28 @@ export function on(name: string, fn: Listener): () => void {
 type Api = Record<string, (...a: any[]) => Promise<Res<any>>>
 let apiPromise: Promise<Api> | null = null
 
-/** pywebview injects window.pywebview.api and fires 'pywebviewready'. In a plain browser
- *  (npm run dev preview) we fall back to an in-memory mock so the UI can be developed. */
+/** pywebview injects window.pywebview.api and fires 'pywebviewready'. The in-memory mock is only
+ *  used by the Vite dev server (`?mock`, or a plain browser); the real app never falls back to it. */
 function getApi(): Promise<Api> {
   if (apiPromise) return apiPromise
   apiPromise = new Promise<Api>((resolve) => {
     if (window.pywebview?.api) return resolve(window.pywebview.api)
-    const timer = setTimeout(() => {
-      console.info('[bridge] no pywebview detected, using mock backend')
-      resolve(createMock(emit) as Api)
-    }, 900)
-    window.addEventListener('pywebviewready', () => {
-      clearTimeout(timer)
-      resolve(window.pywebview!.api)
-    })
+    // import.meta.env.DEV is a build-time constant, so production bundles drop the mock entirely
+    const useMock =
+      import.meta.env.DEV && (new URLSearchParams(location.search).has('mock') || !(window as any).chrome?.webview)
+    if (useMock) {
+      setTimeout(async () => {
+        if (window.pywebview?.api) return resolve(window.pywebview.api)
+        console.info('[bridge] no pywebview detected, using mock backend')
+        resolve((await import('./mock')).createMock(emit) as Api)
+      }, 900)
+    } else {
+      setTimeout(() => {
+        emit('error', 'Cannot reach the ScribSalmon backend. Restart the app.')
+        emit('bridge', 'timeout')
+      }, 10000)
+    }
+    window.addEventListener('pywebviewready', () => resolve(window.pywebview!.api))
   })
   return apiPromise
 }
@@ -55,8 +63,7 @@ export const bridge = {
   listNotes: (q = '') => call<NoteBrief[]>('list_notes', q),
   getNote: (id: string) => call<Note>('get_note', id),
   createNote: () => call<Note>('create_note'),
-  saveNote: (id: string, title: string, transcript: string, summary: string) =>
-    call<NoteBrief>('save_note', id, title, transcript, summary),
+  saveNote: (id: string, patch: NotePatch) => call<SaveResult>('save_note', id, patch),
   deleteNote: (id: string) => call<boolean>('delete_note', id),
   exportNote: (id: string) => call<string | null>('export_note', id),
   startRecording: (id: string, opts: Record<string, unknown>) => call<RecState>('start_recording', id, opts),
@@ -66,5 +73,6 @@ export const bridge = {
   retranscribe: (id: string) => call<boolean>('retranscribe', id),
   review: (id: string, transcript: string) => call<boolean>('review', id, transcript),
   getSettings: () => call<Settings>('get_settings'),
-  saveSettings: (s: Partial<Settings>) => call<Settings>('save_settings', s),
+  saveSettings: (s: SettingsPatch) => call<Settings>('save_settings', s),
+  openExternal: (url: string) => call<boolean>('open_external', url),
 }

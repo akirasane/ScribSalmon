@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { Plus } from 'lucide-react'
 import { bridge, on } from './bridge'
 import { appendLine } from './lib'
-import type { Note, NoteBrief, RecState, ReviewItem, Settings, Toast } from './types'
+import type { Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, Toast } from './types'
 import Aurora from './components/bits/Aurora'
 import BlurText from './components/bits/BlurText'
 import Logo from './components/Logo'
@@ -31,6 +31,7 @@ export default function App() {
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([])
   const [reviewOpen, setReviewOpen] = useState(false)
   const [confirmRefine, setConfirmRefine] = useState(false)
+  const [stopping, setStopping] = useState(false)
 
   const noteRef = useRef<Note | null>(null)
   noteRef.current = note
@@ -38,7 +39,7 @@ export default function App() {
   selRef.current = selId
   const queryRef = useRef('')
   queryRef.current = query
-  const dirty = useRef(false)
+  const dirtyFields = useRef(new Set<'title' | 'transcript' | 'summary'>())
   const timer = useRef<number | undefined>(undefined)
   const toastId = useRef(0)
 
@@ -67,17 +68,52 @@ export default function App() {
   const flush = useCallback(async () => {
     window.clearTimeout(timer.current)
     const n = noteRef.current
-    if (!dirty.current || !n) return
-    dirty.current = false
-    const brief = await guard(bridge.saveNote(n.id, n.title, n.transcript, n.summary))
-    if (brief) setNotes((l) => l.map((x) => (x.id === brief.id ? { ...x, ...brief } : x)))
-  }, [guard])
+    if (!dirtyFields.current.size || !n) return
+    const fields = [...dirtyFields.current]
+    dirtyFields.current.clear()
+    const id = n.id
+    const patch: NotePatch = {}
+    if (fields.includes('title')) patch.title = n.title
+    if (fields.includes('transcript')) {
+      patch.transcript = n.transcript
+      patch.transcript_rev = n.transcript_rev
+    }
+    if (fields.includes('summary')) {
+      patch.summary = n.summary
+      patch.summary_rev = n.summary_rev
+    }
+    const res = await guard(bridge.saveNote(id, patch))
+    if (!res) {
+      // save failed: keep the edits marked so the next flush retries them
+      if (noteRef.current?.id === id) fields.forEach((f) => dirtyFields.current.add(f))
+      return
+    }
+    setNotes((l) => l.map((x) => (x.id === res.id ? { ...x, id: res.id, title: res.title, created: res.created, duration: res.duration, parts: res.parts } : x)))
+    if (res.appended?.length) {
+      // live text arrived while we were saving: merge it into the local copy and save again
+      setNote((cur) =>
+        cur?.id === id ? { ...cur, transcript: res.appended!.reduce(appendLine, cur.transcript), transcript_rev: res.transcript_rev } : cur,
+      )
+      dirtyFields.current.add('transcript')
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => void flushRef.current(), 800)
+    }
+    const lost = res.conflict ?? []
+    if (lost.length) {
+      if (lost.includes('transcript')) toast('error', 'Transcript was replaced by Refine; your recent edit was discarded.')
+      if (lost.includes('summary')) toast('error', 'Summary was regenerated; your recent edit was discarded.')
+      const fresh = await bridge.getNote(id).catch(() => null)
+      if (fresh) setNote((cur) => (cur?.id === id ? fresh : cur))
+    }
+  }, [guard, toast])
+  const flushRef = useRef(flush)
+  flushRef.current = flush
 
   const edit = useCallback(
     (patch: Partial<Pick<Note, 'title' | 'transcript' | 'summary'>>) => {
       setNote((n) => (n ? { ...n, ...patch } : n))
       if (patch.title !== undefined) setNotes((l) => l.map((x) => (x.id === selRef.current ? { ...x, title: patch.title! } : x)))
-      dirty.current = true
+      for (const k of ['title', 'transcript', 'summary'] as const) if (patch[k] !== undefined) dirtyFields.current.add(k)
       window.clearTimeout(timer.current)
       timer.current = window.setTimeout(flush, 800)
     },
@@ -110,15 +146,21 @@ export default function App() {
     })()
 
     const offs = [
-      on('text', ({ id, text }: { id: string; text: string }) => {
-        if (id === selRef.current) setNote((n) => (n && n.id === id ? { ...n, transcript: appendLine(n.transcript, text) } : n))
+      on('text', ({ id, text, rev }: { id: string; text: string; rev?: number }) => {
+        if (id !== selRef.current) return
+        setNote((n) => {
+          if (!n || n.id !== id) return n
+          if (rev !== undefined && rev <= n.transcript_rev) return n // already merged by a save
+          return { ...n, transcript: appendLine(n.transcript, text), transcript_rev: rev ?? n.transcript_rev }
+        })
       }),
-      on('summary', ({ id, markdown }: { id: string; markdown: string | null }) => {
+      on('summary', ({ id, markdown, rev }: { id: string; markdown: string | null; rev?: number }) => {
         setSummarizing(false)
-        if (markdown && id === selRef.current) setNote((n) => (n && n.id === id ? { ...n, summary: markdown } : n))
+        if (markdown && id === selRef.current)
+          setNote((n) => (n && n.id === id ? { ...n, summary: markdown, summary_rev: rev ?? n.summary_rev } : n))
       }),
-      on('transcript', ({ id, text }: { id: string; text: string }) => {
-        if (id === selRef.current) setNote((n) => (n && n.id === id ? { ...n, transcript: text } : n))
+      on('transcript', ({ id, text, rev }: { id: string; text: string; rev?: number }) => {
+        if (id === selRef.current) setNote((n) => (n && n.id === id ? { ...n, transcript: text, transcript_rev: rev ?? n.transcript_rev } : n))
       }),
       on('review', ({ id, items }: { id: string; items: ReviewItem[] | null }) => {
         setReviewing(false)
@@ -135,12 +177,14 @@ export default function App() {
       on('notes', () => {
         refreshList()
         const id = selRef.current
-        if (id) bridge.getNote(id).then((n) => setNote((cur) => (cur && cur.id === id && !dirty.current ? { ...cur, duration: n.duration, parts: n.parts } : cur))).catch(() => {})
+        if (id) bridge.getNote(id).then((n) => setNote((cur) => (cur && cur.id === id && dirtyFields.current.size === 0 ? { ...cur, duration: n.duration, parts: n.parts } : cur))).catch(() => {})
       }),
     ]
-    const bye = () => void flush()
+    const bye = () => void flushRef.current()
     window.addEventListener('beforeunload', bye)
+    window.__flushNow = () => flushRef.current()
     return () => {
+      delete window.__flushNow
       offs.forEach((o) => o())
       window.removeEventListener('beforeunload', bye)
     }
@@ -168,15 +212,17 @@ export default function App() {
     const n = noteRef.current
     if (!n) return
     setConfirmDelete(false)
-    dirty.current = false
+    window.clearTimeout(timer.current)
+    dirtyFields.current.clear()
     if (!(await guard(bridge.deleteNote(n.id)))) return
     const list = (await refreshList()) ?? []
     await select(list[0]?.id ?? null)
   }
 
-  const patchSettings = async (patch: Partial<Settings>) => {
-    setSettings((s) => (s ? { ...s, ...patch } : s))
-    await guard(bridge.saveSettings(patch))
+  const patchSettings = async (patch: SettingsPatch) => {
+    // the server response is the source of truth (secret keys always come back blank)
+    const saved = await guard(bridge.saveSettings(patch))
+    if (saved) setSettings(saved)
   }
 
   const checkWords = async () => {
@@ -232,7 +278,13 @@ export default function App() {
   }
 
   const stop = async () => {
-    await guard(bridge.stopRecording())
+    if (stopping) return
+    setStopping(true)
+    try {
+      await guard(bridge.stopRecording())
+    } finally {
+      setStopping(false)
+    }
   }
 
   const summarize = async () => {
@@ -270,7 +322,7 @@ export default function App() {
               <NoteView
                 key={note.id}
                 note={note}
-                rec={rec}
+                rec={stopping ? { ...rec, stopping } : rec}
                 settings={settings}
                 summarizing={summarizing}
                 busy={busy}
