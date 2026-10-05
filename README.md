@@ -168,6 +168,15 @@ Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run fro
 
 ## Changelog
 
+### 1.3.0
+Hardening and reliability release (includes everything that was planned as 1.1.0 and 1.2.0).
+
+- **Security:** note ids validated (a crafted id could delete the whole Documents folder); links open in your browser and the window can't be navigated away; content-security policy; API keys encrypted with Windows DPAPI and never sent back to the UI; Claude CLI runs in a private folder with the transcript delimited.
+- **Reliability:** no silent mock backend; GPU falls back to CPU automatically (new Device setting); recording start/stop races fixed; audio device errors shown instead of a stuck "Recording"; autosave no longer overwrites live chunks or a fresh summary; edits flushed on close; atomic writes with a settings backup; Refine waits for queued transcription.
+- **Features:** import mp3/m4a/flac/ogg/mp4; Cancel for Refine / Summarize / Check words; "N s behind" indicator and automatic after-Stop fallback when live transcription lags; live chunks cut at pauses instead of mid-word; summaries are no longer silently truncated; version shown in Settings.
+- **Fixes:** numbers no longer collapsed ("100000000"); quiet speech no longer dropped; export filename valid on Windows; Check words fixes the right occurrence; OneDrive-redirected Documents folder supported; faster note list/search.
+- **Build/CI:** removed the old Qt UI; pytest + ruff; the packaged exe is self-tested (including a downloaded-zip scenario); hashed lockfile; SHA-pinned actions; checksums and third-party notices in releases.
+
 ### 1.0.1
 Fix: app failed to start when extracted from a downloaded zip (`Failed to resolve Python.Runtime.Loader.Initialize`).
 
