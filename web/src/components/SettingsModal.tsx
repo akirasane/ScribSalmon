@@ -27,6 +27,7 @@ type KeyName = 'anthropic' | 'openai'
 function keyPlaceholder(source: Settings['anthropic_key_source'], envVar: string, cleared: boolean) {
   if (cleared) return 'Will be removed on save'
   if (source === 'saved') return 'Saved – type to replace'
+  if (source === 'unreadable') return 'Re-enter key'
   if (source === 'env') return `Using ${envVar} from environment`
   return 'Not set'
 }
@@ -131,6 +132,9 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
               )}
             </div>
           </Field>
+          {d.anthropic_key_source === 'unreadable' && (
+            <p className="-mt-2 text-xs text-red-600">Saved key can't be decrypted on this Windows account, re-enter it.</p>
+          )}
           <Field label="OpenAI API key">
             <div className="flex items-center gap-2">
               <input
@@ -151,6 +155,9 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
               )}
             </div>
           </Field>
+          {d.openai_key_source === 'unreadable' && (
+            <p className="-mt-2 text-xs text-red-600">Saved key can't be decrypted on this Windows account, re-enter it.</p>
+          )}
           <Field label="Claude model (API)">
             <input className={input} value={d.claude_model} onChange={(e) => set('claude_model', e.target.value)} />
           </Field>

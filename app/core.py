@@ -205,7 +205,10 @@ class Controller:
             has = bool(getattr(self.s, "effective_" + k))
             d[k] = ""
             d["has_" + k] = has
-            d[k + "_source"] = "saved" if saved else ("env" if os.environ.get(env) else "")
+            if k in getattr(self.s, "_unreadable", ()):
+                d[k + "_source"] = "unreadable"
+            else:
+                d[k + "_source"] = "saved" if saved else ("env" if os.environ.get(env) else "")
         d["default_prompt"] = DEFAULT_PROMPT.strip()
         return d
 

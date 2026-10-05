@@ -109,7 +109,7 @@ npm run dev                         # http://127.0.0.1:5173 - works in a normal 
 | What | Location |
 |---|---|
 | Notes | `Documents\ScribSalmon\<timestamp>\` |
-| Settings (incl. API keys, plain JSON) | `%APPDATA%\ScribSalmon\settings.json` |
+| Settings (API keys encrypted with Windows DPAPI) | `%APPDATA%\ScribSalmon\settings.json` |
 | Whisper models | Hugging Face cache (`~\.cache\huggingface`) |
 
 Each note folder contains `meta.json`, `rec_001.wav ...`, `transcript.txt`, `summary.md`.
