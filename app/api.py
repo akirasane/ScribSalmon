@@ -5,7 +5,9 @@ has to deal with Python tracebacks.
 """
 import json
 import traceback
+import webbrowser
 from typing import Optional
+from urllib.parse import urlparse
 
 import webview
 
@@ -55,8 +57,14 @@ class Api:
         return self._c.create_note()
 
     @_safe
-    def save_note(self, note_id, title, transcript, summary):
-        return self._c.save_note(note_id, title, transcript, summary)
+    def save_note(self, note_id, patch=None, *legacy):
+        if isinstance(patch, str):
+            patch = {"title": patch, "transcript": legacy[0] if len(legacy) > 0 else None,
+                     "summary": legacy[1] if len(legacy) > 1 else None}
+            patch = {k: v for k, v in patch.items() if v is not None}
+        if not isinstance(patch, dict):
+            raise ValueError("Invalid note data.")
+        return self._c.save_note(note_id, patch)
 
     @_safe
     def delete_note(self, note_id):
@@ -111,6 +119,16 @@ class Api:
     def save_settings(self, data):
         return self._c.save_settings(data)
 
-    def shutdown(self):
+    @_safe
+    def open_external(self, url):
+        if not isinstance(url, str) or len(url) > 2048:
+            raise ValueError("Only http(s) links can be opened.")
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.netloc:
+            raise ValueError("Only http(s) links can be opened.")
+        webbrowser.open(p.geturl(), new=2)
+        return True
+
+    def _shutdown(self):
         self._closing = True  # stop pushing events into a closing window
         self._c.shutdown()

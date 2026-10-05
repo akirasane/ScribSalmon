@@ -9,6 +9,7 @@ import SpotlightCard from './bits/SpotlightCard'
 import ShinyText from './bits/ShinyText'
 import ControlBar from './ControlBar'
 import { Button } from './ui'
+import { openExternal } from '../external'
 
 interface Props {
   note: Note
@@ -165,7 +166,16 @@ export default function NoteView(p: Props) {
                 />
               ) : note.summary ? (
                 <motion.div key="view" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="md">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{note.summary}</ReactMarkdown>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ href, children }) => (
+                        <a href={href} rel="noopener noreferrer"
+                          onClick={(e) => { e.preventDefault(); if (href) openExternal(href) }}>{children}</a>
+                      ),
+                      img: ({ alt }) => <span>{alt}</span>,
+                    }}
+                  >{note.summary}</ReactMarkdown>
                 </motion.div>
               ) : (
                 <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="pt-1 text-[13.5px] text-mute">

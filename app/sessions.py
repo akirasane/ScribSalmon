@@ -6,6 +6,7 @@
   summary.md
 """
 import json
+import re
 import shutil
 import wave
 from dataclasses import dataclass
@@ -14,6 +15,17 @@ from pathlib import Path
 from typing import List
 
 from .settings import SESSIONS_DIR
+
+
+VALID_ID = re.compile(r"^[\w-]+$")
+
+
+def is_valid_id(x) -> bool:
+    return isinstance(x, str) and x not in (".", "..") and bool(VALID_ID.match(x))
+
+
+def append_text(cur: str, text: str) -> str:
+    return (cur + "\n" if cur and not cur.endswith("\n") else cur) + text + "\n"
 
 
 @dataclass
@@ -94,14 +106,17 @@ def list_all() -> List[Session]:
     if not SESSIONS_DIR.exists():
         return []
     out = [load(d) for d in SESSIONS_DIR.iterdir()
-           if d.is_dir() and ((d / "meta.json").exists() or any(d.glob("*.wav")))]
+           if is_valid_id(d.name) and d.is_dir() and ((d / "meta.json").exists() or any(d.glob("*.wav")))]
     return sorted(out, key=lambda s: s.created, reverse=True)
 
 
 def delete(s: Session) -> None:
     # only ever remove a folder directly inside SESSIONS_DIR
-    if s.dir.parent.resolve() == SESSIONS_DIR.resolve():
-        shutil.rmtree(s.dir)
+    root = SESSIONS_DIR.resolve()
+    r = s.dir.resolve()
+    if not is_valid_id(s.dir.name) or r.parent != root or r == root:
+        raise ValueError("Refusing to delete outside the notes folder.")
+    shutil.rmtree(r)
 
 
 def fmt_duration(sec: float) -> str:

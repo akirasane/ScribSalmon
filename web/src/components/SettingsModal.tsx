@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import { RotateCcw } from 'lucide-react'
-import type { Settings } from '../types'
+import type { Settings, SettingsPatch } from '../types'
 import { Button, Modal, Select, Toggle } from './ui'
 
 interface Props {
   open: boolean
   settings: Settings | null
   onClose: () => void
-  onSave: (s: Partial<Settings>) => Promise<void>
+  onSave: (s: SettingsPatch) => Promise<void>
 }
 
 const input =
@@ -22,12 +22,25 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
+type KeyName = 'anthropic' | 'openai'
+
+function keyPlaceholder(source: Settings['anthropic_key_source'], envVar: string, cleared: boolean) {
+  if (cleared) return 'Will be removed on save'
+  if (source === 'saved') return 'Saved – type to replace'
+  if (source === 'env') return `Using ${envVar} from environment`
+  return 'Not set'
+}
+
 export default function SettingsModal({ open, settings, onClose, onSave }: Props) {
   const [d, setD] = useState<Settings | null>(settings)
   const [saving, setSaving] = useState(false)
+  const [clear, setClear] = useState<Record<KeyName, boolean>>({ anthropic: false, openai: false })
 
   useEffect(() => {
-    if (open) setD(settings)
+    if (open) {
+      setD(settings)
+      setClear({ anthropic: false, openai: false })
+    }
   }, [open, settings])
 
   if (!d) return <Modal open={false} onClose={onClose}>{null}</Modal>
@@ -56,6 +69,17 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
                 { value: 'large-v3-turbo', label: 'large-v3-turbo (good, fast)' },
                 { value: 'large-v3', label: 'large-v3 (most accurate, slow on CPU)' },
                 { value: 'Thaweewat/whisper-th-medium-ct2', label: 'Thai fine-tuned medium (best for Thai, ~1.5 GB)' },
+              ]}
+            />
+          </Field>
+          <Field label="Device">
+            <Select
+              value={d.device ?? 'auto'}
+              onChange={(v) => set('device', v)}
+              options={[
+                { value: 'auto', label: 'Auto (GPU if it works, else CPU)' },
+                { value: 'cpu', label: 'CPU' },
+                { value: 'cuda', label: 'NVIDIA GPU (CUDA)' },
               ]}
             />
           </Field>
@@ -88,10 +112,44 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
             />
           </Field>
           <Field label="Anthropic API key">
-            <input type="password" className={input} value={d.anthropic_key} onChange={(e) => set('anthropic_key', e.target.value)} />
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                autoComplete="off"
+                className={input}
+                value={d.anthropic_key}
+                placeholder={keyPlaceholder(d.anthropic_key_source, 'ANTHROPIC_API_KEY', clear.anthropic)}
+                onChange={(e) => {
+                  set('anthropic_key', e.target.value)
+                  if (e.target.value) setClear((c) => ({ ...c, anthropic: false }))
+                }}
+              />
+              {d.anthropic_key_source === 'saved' && (
+                <Button className="h-10 px-3" disabled={clear.anthropic} onClick={() => { set('anthropic_key', ''); setClear((c) => ({ ...c, anthropic: true })) }}>
+                  Remove
+                </Button>
+              )}
+            </div>
           </Field>
           <Field label="OpenAI API key">
-            <input type="password" className={input} value={d.openai_key} onChange={(e) => set('openai_key', e.target.value)} />
+            <div className="flex items-center gap-2">
+              <input
+                type="password"
+                autoComplete="off"
+                className={input}
+                value={d.openai_key}
+                placeholder={keyPlaceholder(d.openai_key_source, 'OPENAI_API_KEY', clear.openai)}
+                onChange={(e) => {
+                  set('openai_key', e.target.value)
+                  if (e.target.value) setClear((c) => ({ ...c, openai: false }))
+                }}
+              />
+              {d.openai_key_source === 'saved' && (
+                <Button className="h-10 px-3" disabled={clear.openai} onClick={() => { set('openai_key', ''); setClear((c) => ({ ...c, openai: true })) }}>
+                  Remove
+                </Button>
+              )}
+            </div>
           </Field>
           <Field label="Claude model (API)">
             <input className={input} value={d.claude_model} onChange={(e) => set('claude_model', e.target.value)} />
@@ -123,7 +181,17 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
             onClick={async () => {
               setSaving(true)
               try {
-                await onSave(d)
+                const patch: Record<string, unknown> = {}
+                for (const k of Object.keys(d) as (keyof Settings)[]) {
+                  if (k === 'anthropic_key' || k === 'openai_key') continue
+                  if (k === 'default_prompt' || k.startsWith('has_') || k.endsWith('_source')) continue
+                  if (d[k] !== settings?.[k]) patch[k] = d[k]
+                }
+                if (d.anthropic_key.trim()) patch.anthropic_key = d.anthropic_key.trim()
+                else if (clear.anthropic) patch.clear_anthropic_key = true
+                if (d.openai_key.trim()) patch.openai_key = d.openai_key.trim()
+                else if (clear.openai) patch.clear_openai_key = true
+                await onSave(patch as SettingsPatch)
                 onClose()
               } finally {
                 setSaving(false)

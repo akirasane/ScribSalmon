@@ -1,22 +1,27 @@
 """UI-independent controller: recording, transcription queue, summaries, notes CRUD.
 
 Talks to the UI only through `emit(event, payload)`; works with any front-end.
-Events: text{id,text} summary{id,markdown} status str busy bool error str
+Events: text{id,text,rev} transcript{id,text,rev} summary{id,markdown,rev}
+        status str busy bool error str
         recording{id|None} level float notes (list changed)
 """
 import queue
 import shutil
 import threading
 import time
+from functools import reduce
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import sessions
 from .audio import Recorder
 from .sessions import Session
-from .settings import Settings
+from .settings import SECRETS, Settings, coerce_patch
 from .summarize import DEFAULT_PROMPT, review, summarize
 from .transcribe import SAMPLE_RATE, load_wav, make_engine
+
+ENGINE_KEYS = {"engine", "whisper_model", "whisper_custom", "openai_key", "device"}
+_SECRET_ENV = {"anthropic_key": "ANTHROPIC_API_KEY", "openai_key": "OPENAI_API_KEY"}
 
 
 class Controller:
@@ -27,6 +32,11 @@ class Controller:
         self.engine_lock = threading.Lock()  # one transcription at a time per model
         self.q: "queue.Queue" = queue.Queue()
         self.engine = None
+        self._engine_init_lock = threading.Lock()
+        self._engine_gen = 0
+        self._revs: dict = {}
+        self.rec_lock = threading.Lock()
+        self.rec_live = False
         self.worker: Optional[threading.Thread] = None
         self.recorder: Optional[Recorder] = None
         self.rec_session: Optional[Session] = None
@@ -41,21 +51,59 @@ class Controller:
         if self.s.vocabulary.strip():
             parts.append(self.s.vocabulary.strip())
         if note_id:
-            d = sessions.SESSIONS_DIR / note_id
-            if d.is_dir():
+            d = self._dir(note_id)
+            if d:
                 tail = sessions.load(d).read("transcript.txt").strip()[-160:]
                 if tail:
                     parts.append(tail)
         return (" ".join(parts)[-400:]) or None
 
     # ---------------------------------------------------------------- helpers
+    @staticmethod
+    def _dir(note_id) -> Optional[Path]:
+        if not sessions.is_valid_id(note_id):
+            return None
+        root = sessions.SESSIONS_DIR.resolve()
+        d = (sessions.SESSIONS_DIR / note_id).resolve()
+        if d.parent != root or not d.is_dir():
+            return None
+        return d
+
     def _session(self, note_id: str) -> Session:
-        if not note_id or Path(note_id).name != note_id:
+        if not sessions.is_valid_id(note_id):
             raise ValueError("Invalid note id.")
-        d = sessions.SESSIONS_DIR / note_id
-        if not d.is_dir():
+        d = self._dir(note_id)
+        if d is None:
             raise ValueError("Note not found.")
         return sessions.load(d)
+
+    def _rev(self, nid: str) -> dict:
+        with self.lock:
+            return self._revs.setdefault(nid, {"t": 0, "s": 0, "replaced": 0, "tail": []})
+
+    # ---------------------------------------------------------------- engine
+    def _get_engine(self):
+        while True:
+            with self._engine_init_lock:
+                eng = self.engine
+                if eng is not None:
+                    return eng
+                gen = self._engine_gen
+                self.emit("status", "Loading speech model (first run downloads it)…")
+                self.emit("busy", True)
+                eng = make_engine(self.s)
+                if gen != self._engine_gen:
+                    continue  # settings changed while loading; build again
+                self.engine = eng
+                fb = getattr(eng, "fallback_reason", None)
+                if fb:
+                    self.emit("error", f"GPU unavailable, using CPU: {fb}")
+                return eng
+
+    def _reset_engine(self, only=None):
+        if only is None or self.engine is only:
+            self._engine_gen += 1
+            self.engine = None
 
     @staticmethod
     def _brief(s: Session) -> dict:
@@ -66,6 +114,9 @@ class Controller:
         d = self._brief(s)
         d["transcript"] = s.read("transcript.txt")
         d["summary"] = s.read("summary.md")
+        st = self._rev(s.dir.name)
+        d["transcript_rev"] = st["t"]
+        d["summary_rev"] = st["s"]
         return d
 
     # ---------------------------------------------------------------- notes
@@ -86,20 +137,55 @@ class Controller:
         s = sessions.create()
         return self._full(s)
 
-    def save_note(self, note_id: str, title: str, transcript: str, summary: str) -> dict:
+    def save_note(self, note_id: str, patch: dict) -> dict:
+        if not isinstance(patch, dict):
+            raise ValueError("Invalid note data.")
+        for k in ("title", "transcript", "summary"):
+            if k in patch and not isinstance(patch[k], str):
+                raise ValueError(f"Invalid value for {k}")
         with self.lock:
             s = self._session(note_id)
-            s.title = (title or "").strip() or s.title
-            s.save_meta()
-            s.write("transcript.txt", transcript or "")
-            s.write("summary.md", summary or "")
-            return self._brief(s)
+            st = self._rev(s.dir.name)
+            appended: list = []
+            conflict: list = []
+            if "title" in patch:
+                s.title = patch["title"].strip() or s.title
+                s.save_meta()
+            if "transcript" in patch:
+                text = patch["transcript"]
+                base = patch.get("transcript_rev", st["t"])
+                if not isinstance(base, int) or isinstance(base, bool):
+                    base = -1
+                if base == st["t"]:
+                    s.write("transcript.txt", text)
+                elif st["replaced"] <= base < st["t"]:
+                    appended = [x for r, x in st["tail"] if r > base]
+                    s.write("transcript.txt", reduce(sessions.append_text, appended, text))
+                else:
+                    conflict.append("transcript")
+            if "summary" in patch:
+                base = patch.get("summary_rev", st["s"])
+                if base == st["s"]:
+                    s.write("summary.md", patch["summary"])
+                else:
+                    conflict.append("summary")
+            out = self._brief(s)
+            out["transcript_rev"] = st["t"]
+            out["summary_rev"] = st["s"]
+            if appended:
+                out["appended"] = appended
+            if conflict:
+                out["conflict"] = conflict
+            return out
 
     def delete_note(self, note_id: str) -> bool:
         s = self._session(note_id)
-        if self.rec_session and self.rec_session.dir == s.dir:
-            raise ValueError("Stop recording before deleting this note.")
-        sessions.delete(s)
+        with self.rec_lock:
+            if self.rec_session and self.rec_session.dir.resolve() == s.dir.resolve():
+                raise ValueError("Stop recording before deleting this note.")
+            sessions.delete(s)
+        with self.lock:
+            self._revs.pop(s.dir.name, None)
         return True
 
     def export_note(self, note_id: str, path: str) -> str:
@@ -111,20 +197,50 @@ class Controller:
 
     # ---------------------------------------------------------------- settings
     def get_settings(self) -> dict:
+        import os
         from dataclasses import asdict
         d = asdict(self.s)
+        for k, env in _SECRET_ENV.items():
+            saved = bool(d[k])
+            has = bool(getattr(self.s, "effective_" + k))
+            d[k] = ""
+            d["has_" + k] = has
+            d[k + "_source"] = "saved" if saved else ("env" if os.environ.get(env) else "")
         d["default_prompt"] = DEFAULT_PROMPT.strip()
         return d
 
-    def save_settings(self, data: dict) -> dict:
-        prompt = (data.get("summary_prompt") or "").strip()
-        if prompt == DEFAULT_PROMPT.strip():
-            data["summary_prompt"] = ""
-        for k, v in data.items():
-            if hasattr(self.s, k) and k != "default_prompt":
+    def _apply_settings(self, data: dict) -> set:
+        data = dict(data)
+        clears = {k for k in SECRETS if data.pop("clear_" + k, False) is True}
+        patch = coerce_patch(data, strict=True)
+        for k in SECRETS:
+            if k in patch:
+                patch[k] = patch[k].strip()
+                if not patch[k]:
+                    del patch[k]  # empty typed key = keep the saved one
+        changed = set()
+        for k, v in patch.items():
+            if getattr(self.s, k) != v:
                 setattr(self.s, k, v)
-        self.s.save()
-        self.engine = None  # force model reload
+                changed.add(k)
+        for k in clears:
+            if getattr(self.s, k):
+                setattr(self.s, k, "")
+                changed.add(k)
+        if changed:
+            self.s.save()
+            if changed & ENGINE_KEYS:
+                self._reset_engine()
+        return changed
+
+    def save_settings(self, data: dict) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("Invalid settings.")
+        data = dict(data)
+        prompt = data.get("summary_prompt")
+        if isinstance(prompt, str) and prompt.strip() == DEFAULT_PROMPT.strip():
+            data["summary_prompt"] = ""
+        self._apply_settings(data)
         return self.get_settings()
 
     # ---------------------------------------------------------------- transcription worker
@@ -144,25 +260,30 @@ class Controller:
                     self.emit("busy", False)
                     self.emit("notes", None)
                 continue
+            eng = None
             try:
-                if self.engine is None:
-                    self.emit("status", "Loading speech model (first run downloads it)…")
-                    self.emit("busy", True)
-                    self.engine = make_engine(self.s)
+                eng = self._get_engine()
                 self.emit("busy", True)
                 self.emit("status", f"Transcribing… ({self.q.qsize()} more waiting)")
                 lang = None if self.s.language == "auto" else self.s.language
                 with self.engine_lock:
-                    text = self.engine.transcribe(audio, lang, self._prompt_for(note_id))
+                    text = eng.transcribe(audio, lang, self._prompt_for(note_id))
                 if text:
+                    rev = None
                     with self.lock:
-                        d = sessions.SESSIONS_DIR / note_id
-                        if d.is_dir():
+                        d = self._dir(note_id)
+                        if d:
                             sessions.load(d).append("transcript.txt", text)
-                    self.emit("text", {"id": note_id, "text": text})
+                            st = self._rev(note_id)
+                            st["t"] += 1
+                            rev = st["t"]
+                            st["tail"].append((rev, text))
+                            del st["tail"][:-500]
+                    if rev is not None:
+                        self.emit("text", {"id": note_id, "text": text, "rev": rev})
             except Exception as e:
                 self.emit("error", f"Transcription failed: {e}")
-                self.engine = None
+                self._reset_engine(only=eng)
             finally:
                 self.q.task_done()
                 if self.q.empty():
@@ -186,52 +307,68 @@ class Controller:
 
     # ---------------------------------------------------------------- recording
     def start_recording(self, note_id: str, opts: dict) -> dict:
-        if self.recorder:
-            raise ValueError("Already recording.")
-        for k_js, k in (("system", "use_system"), ("mic", "use_mic"), ("engine", "engine"),
-                        ("language", "language")):
-            if k_js in opts:
-                setattr(self.s, k, opts[k_js])
-        if not (self.s.use_system or self.s.use_mic):
-            raise ValueError("Pick system audio and/or microphone.")
-        self.s.save()
-        s = self._session(note_id)
-        self._ensure_worker()
-        self.rec_session = s
-        self.rec_path = s.next_part_path()
-        live = self.s.live_transcript
-        nid = s.dir.name
-        self.recorder = Recorder(self.rec_path, self.s.use_system, self.s.use_mic,
-                                 on_chunk=(lambda a: self.q.put((nid, a))) if live else (lambda a: None),
-                                 on_error=lambda m: self.emit("error", m))
-        self.recorder.start()
-        self.rec_started = time.time()
-        threading.Thread(target=self._level_loop, args=(self.recorder,), daemon=True).start()
-        self.emit("status", "Recording…" if live else "Recording (transcribe after Stop)…")
-        self.emit("recording", {"id": nid, "started": self.rec_started})
-        return {"id": nid, "started": self.rec_started}
+        with self.rec_lock:
+            if self.recorder:
+                raise ValueError("Already recording.")
+            mapped = {k: opts[k_js] for k_js, k in (("system", "use_system"), ("mic", "use_mic"),
+                                                    ("engine", "engine"), ("language", "language"))
+                      if k_js in opts}
+            self._apply_settings(mapped)
+            if not (self.s.use_system or self.s.use_mic):
+                raise ValueError("Pick system audio and/or microphone.")
+            s = self._session(note_id)
+            self._ensure_worker()
+            path = s.next_part_path()
+            live = self.s.live_transcript
+            nid = s.dir.name
+            rec = Recorder(path, self.s.use_system, self.s.use_mic,
+                           on_chunk=(lambda a: self.q.put((nid, a))) if live else (lambda a: None),
+                           on_error=lambda m: self.emit("error", m),
+                           on_dead=lambda: threading.Thread(target=self._on_rec_dead, args=(rec,),
+                                                            daemon=True).start())
+            try:
+                rec.start()
+            except Exception as e:
+                raise ValueError(f"Could not start recording: {e}")
+            self.recorder = rec
+            self.rec_session = s
+            self.rec_path = path
+            self.rec_live = live
+            self.rec_started = time.time()
+            threading.Thread(target=self._level_loop, args=(rec,), daemon=True).start()
+            self.emit("status", "Recording…" if live else "Recording (transcribe after Stop)…")
+            self.emit("recording", {"id": nid, "started": self.rec_started})
+            return {"id": nid, "started": self.rec_started}
 
     def _level_loop(self, rec: Recorder):
         while self.recorder is rec:
             self.emit("level", rec.level)
             time.sleep(0.08)
 
-    def stop_recording(self) -> dict:
-        rec, sess, path = self.recorder, self.rec_session, self.rec_path
-        if not rec or not sess:
-            return {}
-        self.recorder = None  # ends the level loop
-        rec.stop()
-        nid = sess.dir.name
-        if self.s.live_transcript:
-            self.q.put((nid, None))
-        else:
-            self._transcribe_file(nid, path)
-        self.rec_session = None
-        self.emit("recording", {"id": None})
-        self.emit("status", "Recording saved. Transcribing…")
-        self.emit("notes", None)
-        return self._brief(self._session(nid))
+    def _on_rec_dead(self, rec: Recorder):
+        self.emit("error", "All audio sources stopped; recording saved.")
+        self.stop_recording(expected=rec)
+
+    def stop_recording(self, expected=None) -> dict:
+        with self.rec_lock:
+            rec, sess, path, live = self.recorder, self.rec_session, self.rec_path, self.rec_live
+            if not rec or not sess or (expected is not None and rec is not expected):
+                return {}
+            self.recorder = None  # ends the level loop
+            self.rec_session = None
+            rec.stop()
+            nid = sess.dir.name
+            if live:
+                self.q.put((nid, None))
+            else:
+                self._transcribe_file(nid, path)
+            self.emit("recording", {"id": None})
+            self.emit("status", "Recording saved. Transcribing…")
+            self.emit("notes", None)
+            try:
+                return self._brief(self._session(nid))
+            except ValueError:
+                return {}
 
     def import_wav(self, note_id: str, path: str) -> dict:
         s = self._session(note_id)
@@ -245,7 +382,7 @@ class Controller:
         """Re-run speech-to-text over the WHOLE recording(s) with full context (more accurate than
         live 6 s chunks). Replaces the transcript."""
         s = self._session(note_id)
-        if self.rec_session and self.rec_session.dir == s.dir:
+        if self.rec_session and self.rec_session.dir.resolve() == s.dir.resolve():
             raise ValueError("Stop recording first.")
         parts = s.parts
         if not parts:
@@ -253,26 +390,31 @@ class Controller:
         self.emit("busy", True)
 
         def go():
+            eng = None
             try:
-                if self.engine is None:
-                    self.emit("status", "Loading speech model (first run downloads it)…")
-                    self.engine = make_engine(self.s)
+                eng = self._get_engine()
                 lang = None if self.s.language == "auto" else self.s.language
                 texts = []
                 for i, p in enumerate(parts, 1):
                     self.emit("status", f"Refining transcript… recording {i}/{len(parts)} (this can take a while)")
                     a = load_wav(p)
                     with self.engine_lock:
-                        t = self.engine.transcribe(a, lang, self._prompt_for(None), long_form=True)
+                        t = eng.transcribe(a, lang, self._prompt_for(None), long_form=True)
                     if t:
                         texts.append(t)
                 full = "\n".join(texts).strip() + "\n"
                 with self.lock:
                     s.write("transcript.txt", full)
-                self.emit("transcript", {"id": note_id, "text": full})
+                    st = self._rev(s.dir.name)
+                    st["t"] += 1
+                    st["replaced"] = st["t"]
+                    st["tail"].clear()
+                    rev = st["t"]
+                self.emit("transcript", {"id": note_id, "text": full, "rev": rev})
                 self.emit("status", "Transcript refined.")
             except Exception as e:
                 self.emit("error", f"Refine failed: {e}")
+                self._reset_engine(only=eng)
             finally:
                 self.emit("busy", False)
 
@@ -281,12 +423,14 @@ class Controller:
 
     # ---------------------------------------------------------------- Thai/word review
     def review(self, note_id: str, transcript: str) -> bool:
+        self._session(note_id)
+        transcript = transcript if isinstance(transcript, str) else ""
         self.emit("busy", True)
         self.emit("status", "Checking transcript for garbled words…")
 
         def go():
             try:
-                items = review(transcript, self.s.summary_backend, self.s.anthropic_key,
+                items = review(transcript, self.s.summary_backend, self.s.effective_anthropic_key,
                                self.s.claude_model, self.s.vocabulary)
                 self.emit("review", {"id": note_id, "items": items})
                 self.emit("status", f"Found {len(items)} phrase(s) to check." if items else "Nothing suspicious found.")
@@ -301,18 +445,24 @@ class Controller:
 
     # ---------------------------------------------------------------- summary
     def summarize(self, note_id: str, transcript: str) -> None:
+        self._session(note_id)
+        transcript = transcript if isinstance(transcript, str) else ""
         self.emit("busy", True)
         self.emit("status", "Summarizing with Claude… (CLI can take ~30 s)")
 
         def go():
             try:
-                md = summarize(transcript, self.s.summary_backend, self.s.anthropic_key,
+                md = summarize(transcript, self.s.summary_backend, self.s.effective_anthropic_key,
                                self.s.claude_model, self.s.summary_prompt)
+                rev = 0
                 with self.lock:
-                    d = sessions.SESSIONS_DIR / note_id
-                    if d.is_dir():
+                    d = self._dir(note_id)
+                    if d:
                         sessions.load(d).write("summary.md", md)
-                self.emit("summary", {"id": note_id, "markdown": md})
+                        st = self._rev(note_id)
+                        st["s"] += 1
+                        rev = st["s"]
+                self.emit("summary", {"id": note_id, "markdown": md, "rev": rev})
                 self.emit("status", "Summary done.")
             except Exception as e:
                 self.emit("summary", {"id": note_id, "markdown": None})
@@ -323,5 +473,4 @@ class Controller:
         threading.Thread(target=go, daemon=True).start()
 
     def shutdown(self):
-        if self.recorder:
-            self.stop_recording()
+        self.stop_recording()

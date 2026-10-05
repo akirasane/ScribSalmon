@@ -1,5 +1,5 @@
 // In-memory fake backend so the UI can be developed/tested in a normal browser.
-import type { Note } from './types'
+import type { Note, NotePatch } from './types'
 
 const SUMMARY = `## Overview
 The team planned the mobile app launch for the end of November and reviewed backend status and testing budget.
@@ -34,14 +34,15 @@ const LINES = [
 export function createMock(emit: (n: string, p: unknown) => void) {
   const now = Date.now()
   const notes: Note[] = [
-    { id: 'n3', title: 'Weekly standup', created: new Date(now - 36e5).toISOString(), duration: 754, parts: 2, transcript: LINES.join('\n') + '\n', summary: SUMMARY },
-    { id: 'n2', title: 'Client call - Acme', created: new Date(now - 864e5).toISOString(), duration: 1980, parts: 1, transcript: 'สวัสดีครับ วันนี้เรามาคุยเรื่องโปรเจกต์ใหม่\n', summary: '' },
-    { id: 'n1', title: 'Retro', created: new Date(now - 3 * 864e5).toISOString(), duration: 0, parts: 0, transcript: '', summary: '' },
+    { id: 'n3', title: 'Weekly standup', created: new Date(now - 36e5).toISOString(), duration: 754, parts: 2, transcript: LINES.join('\n') + '\n', summary: SUMMARY, transcript_rev: 0, summary_rev: 0 },
+    { id: 'n2', title: 'Client call - Acme', created: new Date(now - 864e5).toISOString(), duration: 1980, parts: 1, transcript: 'สวัสดีครับ วันนี้เรามาคุยเรื่องโปรเจกต์ใหม่\n', summary: '', transcript_rev: 0, summary_rev: 0 },
+    { id: 'n1', title: 'Retro', created: new Date(now - 3 * 864e5).toISOString(), duration: 0, parts: 0, transcript: '', summary: '', transcript_rev: 0, summary_rev: 0 },
   ]
   let rec: { id: string; t: number; timers: number[] } | null = null
   let settings: any = {
     engine: 'local', language: 'auto', whisper_model: 'small', use_system: true, use_mic: true,
-    live_transcript: true, summary_backend: 'auto', summary_prompt: '', anthropic_key: '', openai_key: '',
+    live_transcript: true, summary_backend: 'auto', summary_prompt: '', device: 'auto', anthropic_key: '', openai_key: '',
+    has_anthropic_key: false, has_openai_key: false, anthropic_key_source: '', openai_key_source: '',
     whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
   }
   const brief = (n: Note) => ({ id: n.id, title: n.title, created: n.created, duration: n.duration, parts: n.parts })
@@ -52,14 +53,17 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     list_notes: (q: string) => ok(notes.filter((n) => !q || (n.title + n.transcript + n.summary).toLowerCase().includes(q.toLowerCase())).map(brief)),
     get_note: (id: string) => ok({ ...find(id) }),
     create_note: () => {
-      const n: Note = { id: 'n' + Date.now(), title: 'New meeting', created: new Date().toISOString(), duration: 0, parts: 0, transcript: '', summary: '' }
+      const n: Note = { id: 'n' + Date.now(), title: 'New meeting', created: new Date().toISOString(), duration: 0, parts: 0, transcript: '', summary: '', transcript_rev: 0, summary_rev: 0 }
       notes.unshift(n)
       return ok({ ...n })
     },
-    save_note: (id: string, title: string, transcript: string, summary: string) => {
-      Object.assign(find(id), { title, transcript, summary })
-      return ok(brief(find(id)))
+    save_note: (id: string, patch: NotePatch) => {
+      const n = find(id)
+      const { title, transcript, summary } = patch
+      Object.assign(n, { ...(title !== undefined && { title }), ...(transcript !== undefined && { transcript }), ...(summary !== undefined && { summary }) })
+      return ok({ ...brief(n), transcript_rev: n.transcript_rev, summary_rev: n.summary_rev })
     },
+    open_external: (url: string) => { window.open(url, '_blank', 'noopener,noreferrer'); return ok(true) },
     delete_note: (id: string) => { notes.splice(notes.findIndex((n) => n.id === id), 1); return ok(true) },
     export_note: () => ok(null),
     start_recording: (id: string) => {
@@ -68,8 +72,8 @@ export function createMock(emit: (n: string, p: unknown) => void) {
       timers.push(window.setInterval(() => emit('level', 0.02 + 0.09 * Math.abs(Math.sin(Date.now() / 260)) * Math.random()), 80))
       let i = 0
       timers.push(window.setInterval(() => {
-        emit('text', { id, text: LINES[i % LINES.length] })
-        const n = find(id); n.transcript += LINES[i % LINES.length] + '\n'; i++
+        const n = find(id); n.transcript += LINES[i % LINES.length] + '\n'; n.transcript_rev++
+        emit('text', { id, text: LINES[i % LINES.length], rev: n.transcript_rev }); i++
       }, 3500))
       emit('recording', { id, started: rec.t / 1000 })
       emit('status', 'Recording…')
@@ -86,12 +90,12 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     add_wav: () => ok(null),
     summarize: (id: string) => {
       emit('busy', true); emit('status', 'Summarizing with Claude…')
-      setTimeout(() => { find(id).summary = SUMMARY; emit('summary', { id, markdown: SUMMARY }); emit('busy', false); emit('status', 'Summary done.') }, 2600)
+      setTimeout(() => { const n = find(id); n.summary = SUMMARY; n.summary_rev++; emit('summary', { id, markdown: SUMMARY, rev: n.summary_rev }); emit('busy', false); emit('status', 'Summary done.') }, 2600)
       return ok(true)
     },
     retranscribe: (id: string) => {
       emit('busy', true); emit('status', 'Refining transcript…')
-      setTimeout(() => { const t = LINES.join('\n') + '\n'; find(id).transcript = t; emit('transcript', { id, text: t }); emit('busy', false); emit('status', 'Transcript refined.') }, 2200)
+      setTimeout(() => { const t = LINES.join('\n') + '\n'; const n = find(id); n.transcript = t; n.transcript_rev++; emit('transcript', { id, text: t, rev: n.transcript_rev }); emit('busy', false); emit('status', 'Transcript refined.') }, 2200)
       return ok(true)
     },
     review: (id: string, transcript: string) => {

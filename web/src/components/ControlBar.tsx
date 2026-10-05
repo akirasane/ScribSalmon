@@ -52,7 +52,7 @@ export default function ControlBar({ note, rec, settings, onSettings, onStart, o
             {recordingHere ? 'Recording' : note.parts ? 'Record more' : 'Record'}
           </motion.button>
 
-          <Button disabled={!recordingHere} onClick={onStop} icon={<Square className="size-3.5 fill-current" />} className="h-10">
+          <Button disabled={!recordingHere || !!rec.stopping} onClick={onStop} icon={<Square className="size-3.5 fill-current" />} className="h-10">
             Stop
           </Button>
 
