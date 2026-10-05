@@ -81,6 +81,12 @@ jobs:
           Copy-Item THIRD_PARTY_NOTICES.txt dist\ScribSalmon\ -Force
           Copy-Item LICENSE dist\ScribSalmon\ -Force
 
+      - name: Build installer
+        run: ./installer/build-installer.ps1 -Version (Get-Content VERSION -Raw).Trim()
+
+      - name: Installer test
+        run: ./installer/test-installer.ps1 -Setup (Get-Item installer\Output\ScribSalmon-Setup-*.exe).FullName
+
       - name: Self-test the frozen app
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'st.json'

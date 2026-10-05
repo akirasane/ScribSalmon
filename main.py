@@ -18,6 +18,7 @@ from app.api import Api
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 DIST = ROOT / "web" / "dist" / "index.html"
 ICON = ROOT / "assets" / "icon.ico"
+APP_MUTEX = "ScribSalmonAppMutex"  # must match AppMutex in installer/ScribSalmon.iss
 APP_ID = "OmeletteSalmon.ScribSalmon"  # own taskbar identity (otherwise Windows groups us under python.exe)
 
 
@@ -87,6 +88,7 @@ def main() -> int:
         i = sys.argv.index("--selftest")
         out = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
         return selftest.run(out)
+    winutil.create_app_mutex(APP_MUTEX)  # lets the installer detect a running instance
     dev = "--dev" in sys.argv
     if dev:
         url = "http://127.0.0.1:5173"

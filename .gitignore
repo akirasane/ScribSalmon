@@ -9,3 +9,4 @@ web/dist/
 *.log
 .vscode/
 .idea/
+installer/Output/

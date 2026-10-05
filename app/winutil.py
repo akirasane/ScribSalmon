@@ -28,7 +28,30 @@ def set_app_user_model_id(app_id: str) -> None:
         pass
 
 
-FOLDERID_DOCUMENTS = "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}"
+_app_mutex_handle = None  # kept for the process lifetime on purpose (never closed)
+
+
+def create_app_mutex(name: str) -> Optional[int]:
+    """Named mutex the installer (Inno AppMutex/CheckForMutexes) uses to detect a running app."""
+    global _app_mutex_handle
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        create = ctypes.windll.kernel32.CreateMutexW
+        create.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        create.restype = wintypes.HANDLE
+        handle = create(None, False, name)
+        if handle:
+            _app_mutex_handle = int(handle)
+            return _app_mutex_handle
+    except Exception:
+        pass
+    return None
+
+
+FOLDERID_DOCUMENTS ="{FDD39AD0-238F-46AF-ADB4-6C85480369C7}"
 
 
 def known_folder(folder_id_guid: str) -> Optional[Path]:
