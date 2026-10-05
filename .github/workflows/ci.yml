@@ -1,9 +1,16 @@
 name: CI
 
+# requirements.lock = hashed pins for Windows / CPython 3.12 (runtime deps + pyinstaller). Regenerate with:
+#   uv pip compile <requirements.txt without PySide6> + "pyinstaller>=6.10" --python-version 3.12 \
+#     --python-platform x86_64-pc-windows-msvc --generate-hashes -o requirements.lock
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   web:
@@ -12,8 +19,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -25,13 +32,79 @@ jobs:
   python:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.lock
       - name: Install deps
         run: |
-          pip install -r requirements.txt
-      - name: Byte-compile
-        run: python -m compileall -q app main.py tools
+          pip install --require-hashes -r requirements.lock
+          pip install "pytest>=8" "ruff>=0.6"
+      - name: Lint
+        run: ruff check .
+      - name: Tests
+        run: pytest -q
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install Python deps
+        run: pip install --require-hashes -r requirements.lock
+
+      - name: Package with PyInstaller
+        run: pyinstaller ScribSalmon.spec --noconfirm
+
+      - name: Self-test the frozen app
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'st.json'
+          $p = Start-Process dist\ScribSalmon\ScribSalmon.exe -ArgumentList '--selftest', $out -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out }
+          if ($p.ExitCode -ne 0) { throw "selftest exit code $($p.ExitCode)" }
+
+      - name: Zip, extract and self-test with Mark-of-the-Web
+        run: |
+          Compress-Archive -Path dist\ScribSalmon -DestinationPath "$env:RUNNER_TEMP\pkg.zip"
+          $dest = Join-Path $env:RUNNER_TEMP 'extracted'
+          Expand-Archive "$env:RUNNER_TEMP\pkg.zip" -DestinationPath $dest
+          # a browser download marks every extracted file as coming from the Internet zone
+          Get-ChildItem $dest -Recurse -File | ForEach-Object {
+            Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          $out = Join-Path $env:RUNNER_TEMP 'st-motw.json'
+          $p = Start-Process (Join-Path $dest 'ScribSalmon\ScribSalmon.exe') -ArgumentList '--selftest', $out -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out }
+          if ($p.ExitCode -ne 0) { throw "selftest (MOTW) exit code $($p.ExitCode)" }
+
+      - name: Negative check (selftest must FAIL with Mark-of-the-Web and no ScribSalmon.exe.config)
+        continue-on-error: true
+        run: |
+          $copy = Join-Path $env:RUNNER_TEMP 'noconfig'
+          Copy-Item dist\ScribSalmon $copy -Recurse
+          Remove-Item (Join-Path $copy 'ScribSalmon.exe.config')
+          Get-ChildItem $copy -Recurse -File | ForEach-Object {
+            Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          $out = Join-Path $env:RUNNER_TEMP 'st-neg.json'
+          $p = Start-Process (Join-Path $copy 'ScribSalmon.exe') -ArgumentList '--selftest', $out -Wait -PassThru
+          if ($p.ExitCode -eq 0) { throw 'selftest passed without exe.config: it is not guarding the 1.0.0 crash' }
+          Write-Host "OK: selftest failed as expected (exit $($p.ExitCode))"
