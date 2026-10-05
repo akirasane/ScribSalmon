@@ -86,8 +86,8 @@ jobs:
           Compress-Archive -Path dist\ScribSalmon -DestinationPath "$env:RUNNER_TEMP\pkg.zip"
           $dest = Join-Path $env:RUNNER_TEMP 'extracted'
           Expand-Archive "$env:RUNNER_TEMP\pkg.zip" -DestinationPath $dest
-          # a browser download marks every extracted file as coming from the Internet zone
-          Get-ChildItem $dest -Recurse -File | ForEach-Object {
+          # a browser download marks every extracted file as coming from the Internet zone; the exe itself is skipped because a marked exe triggers an interactive SmartScreen prompt that no runner can answer (the crash we guard against was in the DLLs)
+          Get-ChildItem $dest -Recurse -File | Where-Object { $_.Extension -ne ".exe" } | ForEach-Object {
             Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
           }
           $out = Join-Path $env:RUNNER_TEMP 'st-motw.json'
@@ -101,7 +101,7 @@ jobs:
           $copy = Join-Path $env:RUNNER_TEMP 'noconfig'
           Copy-Item dist\ScribSalmon $copy -Recurse
           Remove-Item (Join-Path $copy 'ScribSalmon.exe.config')
-          Get-ChildItem $copy -Recurse -File | ForEach-Object {
+          Get-ChildItem $copy -Recurse -File | Where-Object { $_.Extension -ne ".exe" } | ForEach-Object {
             Set-Content -Path $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
           }
           $out = Join-Path $env:RUNNER_TEMP 'st-neg.json'
