@@ -1,6 +1,7 @@
 """Pluggable speech-to-text engines."""
 import gc
 import io
+import os
 import re
 import wave
 from abc import ABC, abstractmethod
@@ -8,12 +9,22 @@ from typing import Optional
 
 import numpy as np
 
+from .errors import Cancelled
+
 SAMPLE_RATE = 16000
 SILENCE_RMS = 0.003
 
 
-def is_silent(audio: np.ndarray) -> bool:
-    return len(audio) == 0 or float(np.sqrt(np.mean(audio ** 2))) < SILENCE_RMS
+def is_silent(audio: np.ndarray, strict: bool = False) -> bool:
+    """Skip-transcription gate. Default (local engine): only near-digital-silence, since the VAD filters the
+    rest and a fixed RMS gate drops quiet speech. strict=True: the old RMS < 0.003 gate (OpenAI engine, which
+    has no VAD and hallucinates on noise)."""
+    if len(audio) == 0:
+        return True
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if strict:
+        return rms < SILENCE_RMS
+    return float(np.max(np.abs(audio))) < 0.003 or rms < 0.0005
 
 
 def normalize(audio: np.ndarray) -> np.ndarray:
@@ -27,18 +38,27 @@ def normalize(audio: np.ndarray) -> np.ndarray:
 _REPEAT = re.compile(r"(.{2,40}?)\1{3,}", re.S)
 
 
+def _collapse(m: "re.Match") -> str:
+    unit = m.group(1)
+    # numbers / punctuation runs ("100000000", "......") are legitimate, not a Whisper loop
+    return unit if any(c.isalpha() for c in unit) else m.group(0)
+
+
 def collapse_repeats(text: str) -> str:
-    """Whisper sometimes loops ("ทุกคนทุกคนทุกคน..."). Collapse 4+ immediate repeats to one."""
-    return _REPEAT.sub(r"\1", text)
+    """Whisper sometimes loops ("ทุกคนทุกคนทุกคน..."). Collapse 4+ immediate repeats of a unit containing
+    letters to one."""
+    return _REPEAT.sub(_collapse, text)
 
 
 class Engine(ABC):
     @abstractmethod
     def transcribe(self, audio: np.ndarray, language: Optional[str], prompt: Optional[str] = None,
-                   long_form: bool = False) -> str:
+                   long_form: bool = False, should_stop=None) -> str:
         """audio: float32 mono 16 kHz. language: 'th'/'en'/None(auto).
         prompt: context/vocabulary hint. long_form: whole recording (keeps context across windows,
-        one line per segment) instead of a short live chunk."""
+        one line per segment) instead of a short live chunk.
+        should_stop: optional callable checked between segments; when it returns True raise
+        errors.Cancelled."""
 
 
 def _cuda_count() -> int:
@@ -88,19 +108,21 @@ class LocalWhisper(Engine):
                                         condition_on_previous_text=False)
         list(segs)
 
-    def transcribe(self, audio, language, prompt=None, long_form=False):
+    def transcribe(self, audio, language, prompt=None, long_form=False, should_stop=None):
         try:
-            return self._transcribe(audio, language, prompt, long_form)
+            return self._transcribe(audio, language, prompt, long_form, should_stop)
         except RuntimeError as e:
             if self.device == "cuda" and self.requested == "auto" and _CUDA_ERR.search(str(e)):
                 self.fallback_reason = str(e)
                 self.model = None
                 gc.collect()
                 self._load("cpu", "int8")
-                return self._transcribe(audio, language, prompt, long_form)
+                return self._transcribe(audio, language, prompt, long_form, should_stop)
             raise
 
-    def _transcribe(self, audio, language, prompt=None, long_form=False):
+    def _transcribe(self, audio, language, prompt=None, long_form=False, should_stop=None):
+        if should_stop and should_stop():
+            raise Cancelled()
         if is_silent(audio):
             return ""
         audio = normalize(audio)
@@ -116,7 +138,13 @@ class LocalWhisper(Engine):
                 without_timestamps=without_timestamps,
                 repetition_penalty=1.1 if long_form else 1.0,
                 temperature=[0.0, 0.2, 0.4], compression_ratio_threshold=2.2)
-            return [x.text.strip() for x in segs if x.text.strip()], info
+            out = []
+            for x in segs:
+                if should_stop and should_stop():
+                    raise Cancelled()
+                if x.text.strip():
+                    out.append(x.text.strip())
+            return out, info
 
         texts, info = run(False)
         # Some fine-tuned models (e.g. the Thai Thonburian conversion) emit nothing when timestamp tokens
@@ -133,8 +161,10 @@ class OpenAIWhisper(Engine):
             raise ValueError("OpenAI API key missing (Settings).")
         self.client = OpenAI(api_key=api_key)
 
-    def transcribe(self, audio, language, prompt=None, long_form=False):
-        if is_silent(audio):
+    def transcribe(self, audio, language, prompt=None, long_form=False, should_stop=None):
+        if should_stop and should_stop():
+            raise Cancelled()
+        if is_silent(audio, strict=True):
             return ""
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
@@ -158,16 +188,82 @@ def make_engine(settings) -> Engine:
                         getattr(settings, "device", "auto"))
 
 
-def load_wav(path) -> np.ndarray:
-    """Load any wav as float32 mono 16 kHz (simple resample)."""
-    with wave.open(str(path), "rb") as wf:
-        sr, ch, sw = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
-        if sw != 2:
-            raise ValueError("Only 16-bit PCM WAV supported for import.")
-        data = np.frombuffer(wf.readframes(wf.getnframes()), np.int16).astype(np.float32) / 32768
-    if ch > 1:
-        data = data.reshape(-1, ch).mean(axis=1)
-    if sr != SAMPLE_RATE:
-        n = int(len(data) * SAMPLE_RATE / sr)
-        data = np.interp(np.linspace(0, len(data) - 1, n), np.arange(len(data)), data).astype(np.float32)
+def _read_fast_wav(path) -> Optional[np.ndarray]:
+    """float32 samples if `path` is a 16-bit PCM 16 kHz mono WAV, else None (needs the decoder)."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            if wf.getframerate() != SAMPLE_RATE or wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+                return None
+            raw = wf.readframes(wf.getnframes())
+    except (wave.Error, EOFError):
+        return None
+    return np.frombuffer(raw, "<i2").astype(np.float32) / 32768
+
+
+def _av_decode(path) -> np.ndarray:
+    """PyAV decode + resample to 16 kHz mono (faster_whisper.decode_audio). Falls back to an equivalent
+    local decode when decode_audio is incompatible with the installed PyAV (av>=17 dropped the
+    `metadata_errors` argument that faster-whisper 1.2.1 passes)."""
+    from faster_whisper import decode_audio
+    try:
+        return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+    except TypeError as e:
+        if "metadata_errors" not in str(e):
+            raise
+    import av
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+    chunks = []
+    with av.open(str(path), mode="r") as container:
+        for frame in container.decode(audio=0):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+        for out in resampler.resample(None):
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, np.float32)
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
+def decode_any(path) -> np.ndarray:
+    """Any audio/video file -> float32 mono 16 kHz. Raises ValueError with a readable message."""
+    fast = _read_fast_wav(path)
+    if fast is not None:
+        return fast
+    try:
+        data = _av_decode(path)
+    except Exception as e:
+        raise ValueError(f"Could not read this audio file ({type(e).__name__}: {e}). "
+                         "It may be corrupt or an unsupported format.") from e
+    data = np.asarray(data, dtype=np.float32)
+    if data.ndim > 1:
+        data = data.mean(axis=0)
     return data
+
+
+def load_wav(path) -> np.ndarray:
+    """Load an audio file as float32 mono 16 kHz (WAV fast path, otherwise decoded/resampled by PyAV)."""
+    return decode_any(path)
+
+
+def import_audio(src, dest_wav) -> float:
+    """Validate + convert `src` to a 16 kHz mono 16-bit WAV at `dest_wav` (atomically). Returns seconds.
+    Raises ValueError on unsupported/corrupt input before anything is written to the destination."""
+    data = decode_any(src)
+    if len(data) == 0:
+        raise ValueError("This audio file contains no audio.")
+    pcm = (np.clip(data, -1.0, 1.0) * 32767).astype("<i2")
+    dest = os.fspath(dest_wav)
+    tmp = os.path.join(os.path.dirname(dest) or ".", f".{os.path.basename(dest)}.{os.getpid()}.tmp")
+    try:
+        with wave.open(tmp, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm.tobytes())
+        os.replace(tmp, dest)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return len(pcm) / SAMPLE_RATE

@@ -1,8 +1,10 @@
-"""Characterization of app.transcribe helpers (current behavior), plus xfail(strict) known bugs for 1.2."""
+"""Characterization of app.transcribe helpers (current behavior)."""
+import wave
+
 import numpy as np
 import pytest
 
-from app import transcribe
+from app import errors, transcribe
 
 
 def test_collapse_repeats_thai_loop():
@@ -16,7 +18,6 @@ def test_collapse_repeats_leaves_normal_text_and_short_repeats():
     assert transcribe.collapse_repeats("ab" * 6) == "ab"
 
 
-@pytest.mark.xfail(strict=True, reason="known bug (fix in 1.2): repeated digits are treated as a Whisper loop")
 def test_collapse_repeats_keeps_long_numbers():
     assert transcribe.collapse_repeats("100000000") == "100000000"
 
@@ -27,7 +28,6 @@ def test_is_silent_basic():
     assert not transcribe.is_silent(np.full(16000, 0.1, np.float32))
 
 
-@pytest.mark.xfail(strict=True, reason="known bug (fix in 1.2): fixed RMS gate drops quiet speech")
 def test_is_silent_does_not_drop_quiet_speech():
     t = np.arange(16000) / 16000
     quiet = (0.004 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)  # rms ~0.0028 < SILENCE_RMS
@@ -55,6 +55,96 @@ def test_load_wav_resamples_and_downmixes(wav_file):
     assert len(b) == 16000
 
 
-def test_load_wav_rejects_non_16bit(wav_file):
+def test_load_wav_decodes_24bit(wav_file):
+    a = transcribe.load_wav(wav_file(sampwidth=3, seconds=1.0))
+    assert len(a) == 16000
+
+
+def _read(p):
+    with wave.open(str(p), "rb") as w:
+        return w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
+
+
+def test_import_audio_fast_path(wav_file, tmp_path):
+    dest = tmp_path / "out" / "a.wav"
+    dest.parent.mkdir()
+    dur = transcribe.import_audio(wav_file(seconds=1.5), dest)
+    assert dur == pytest.approx(1.5)
+    assert _read(dest) == (16000, 1, 2, 24000)
+    assert [p.name for p in dest.parent.iterdir()] == ["a.wav"]
+
+
+def test_import_audio_44k_stereo(wav_file, tmp_path):
+    dest = tmp_path / "a.wav"
+    dur = transcribe.import_audio(wav_file(sr=44100, ch=2, seconds=1.0, name="s.wav"), dest)
+    assert dur == pytest.approx(1.0, abs=0.05)
+    assert _read(dest)[:3] == (16000, 1, 2)
+
+
+def test_import_audio_24bit(wav_file, tmp_path):
+    dest = tmp_path / "a.wav"
+    dur = transcribe.import_audio(wav_file(sampwidth=3, seconds=1.0, name="w.wav"), dest)
+    assert dur == pytest.approx(1.0, abs=0.05)
+    assert _read(dest)[:3] == (16000, 1, 2)
+
+
+def test_import_audio_garbage_leaves_nothing(tmp_path):
+    bad = tmp_path / "bad.mp3"
+    bad.write_bytes(b"this is not audio at all" * 50)
+    dest = tmp_path / "note" / "a.wav"
+    dest.parent.mkdir()
     with pytest.raises(ValueError):
-        transcribe.load_wav(wav_file(sampwidth=3))
+        transcribe.import_audio(bad, dest)
+    assert list(dest.parent.iterdir()) == []
+
+
+def test_collapse_repeats_digits_dots_and_words():
+    assert transcribe.collapse_repeats("100000000") == "100000000"
+    assert transcribe.collapse_repeats("wait......") == "wait......"
+    assert transcribe.collapse_repeats("hahahahaha") == "ha"
+    assert transcribe.collapse_repeats("ทุกคน" * 6) == "ทุกคน"
+
+
+def test_is_silent_local_vs_strict():
+    t = np.arange(16000) / 16000
+    quiet = (0.01 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)  # peak 0.01, rms ~0.007
+    assert not transcribe.is_silent(quiet)
+    assert not transcribe.is_silent(quiet, strict=True)
+    assert transcribe.is_silent(quiet * 0.3, strict=True)  # rms ~0.002
+    assert not transcribe.is_silent(quiet * 0.3)
+    assert transcribe.is_silent(np.full(16000, 0.002, np.float32))
+    assert transcribe.is_silent(np.zeros(16000, np.float32))
+
+
+class _Seg:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeModel:
+    def transcribe(self, audio, **kw):
+        def gen():
+            yield _Seg("one")
+            yield _Seg("two")
+        return gen(), type("I", (), {"duration_after_vad": 2.0})()
+
+
+def _local():
+    e = transcribe.LocalWhisper.__new__(transcribe.LocalWhisper)
+    e.model, e.device, e.requested, e.fallback_reason = _FakeModel(), "cpu", "cpu", None
+    return e
+
+
+def test_local_transcribe_should_stop_raises_cancelled():
+    audio = np.full(16000, 0.1, np.float32)
+    assert _local().transcribe(audio, "en", long_form=True) == "one\ntwo"
+    calls = []
+
+    def stop():
+        calls.append(1)
+        return len(calls) > 1  # let the pre-check pass, stop after the first segment
+
+    with pytest.raises(errors.Cancelled):
+        _local().transcribe(audio, "en", should_stop=stop)
+    with pytest.raises(errors.Cancelled):
+        _local().transcribe(audio, "en", should_stop=lambda: True)
