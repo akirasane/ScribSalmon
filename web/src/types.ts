@@ -43,7 +43,41 @@ export interface Settings {
   default_prompt: string
   /** App version, read-only, from the backend */
   version?: string
+  /** Check GitHub for a newer release on launch (at most once a day) */
+  check_updates: boolean
+  /** Read-only/internal: epoch seconds of the last successful check */
+  last_update_check?: number
+  /** Read-only/internal: release the user chose to skip ('' = none) */
+  skipped_version?: string
+  /** Read-only, from the backend */
+  install_mode?: InstallMode
 }
+
+export type InstallMode = 'installed' | 'portable' | 'source'
+
+/** Payload of the `update_available` event (and the useful part of check_for_updates). */
+export interface UpdateInfo {
+  version: string
+  notes_url: string
+  size: number | null
+  install_mode: InstallMode
+  /** false = no installer asset or source run: only the release page can be offered */
+  can_install: boolean
+}
+
+/** Result of bridge.checkForUpdates */
+export interface UpdateCheck {
+  current: string
+  latest: string | null
+  available: boolean
+  notes_url: string | null
+  size: number | null
+  install_mode: InstallMode
+  skipped: boolean
+  can_install: boolean
+}
+
+export type UpdatePhase = 'idle' | 'available' | 'downloading' | 'ready' | 'installing' | 'error'
 
 export interface Toast {
   id: number

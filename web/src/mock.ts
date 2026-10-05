@@ -43,8 +43,12 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     engine: 'local', language: 'auto', whisper_model: 'small', use_system: true, use_mic: true,
     live_transcript: true, summary_backend: 'auto', summary_prompt: '', device: 'auto', anthropic_key: '', openai_key: '',
     has_anthropic_key: false, has_openai_key: false, anthropic_key_source: '', openai_key_source: '',
-    whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', version: 'dev', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
+    whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', version: 'dev', check_updates: true, last_update_check: 0, skipped_version: '', install_mode: 'installed', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
   }
+  // `?update` in the URL pretends 9.9.9 is available, to develop the banner
+  const fakeUpdate = new URLSearchParams(location.search).has('update')
+  let dl: number | null = null
+  const stopDl = () => { if (dl !== null) clearInterval(dl); dl = null }
   const brief = (n: Note) => ({ id: n.id, title: n.title, created: n.created, duration: n.duration, parts: n.parts })
   const ok = <T,>(data: T) => Promise.resolve({ ok: true as const, data })
   const find = (id: string) => notes.find((n) => n.id === id)!
@@ -125,6 +129,30 @@ export function createMock(emit: (n: string, p: unknown) => void) {
       }, () => emit('review', { id, items: null }))
       return ok(true)
     },
+    check_for_updates: (force: boolean) => {
+      settings.last_update_check = Date.now() / 1000
+      const info = { version: '9.9.9', notes_url: 'https://github.com/akirasane/ScribSalmon/releases/tag/v9.9.9', size: 180 << 20, install_mode: settings.install_mode, can_install: true }
+      if (fakeUpdate) emit('update_available', info)
+      return ok({
+        current: 'dev', latest: fakeUpdate ? info.version : null, available: fakeUpdate,
+        notes_url: fakeUpdate ? info.notes_url : null, size: fakeUpdate ? info.size : null,
+        install_mode: settings.install_mode, skipped: false, can_install: true, force,
+      })
+    },
+    download_update: () => {
+      stopDl()
+      let pct = 0
+      const total = 180 << 20
+      dl = window.setInterval(() => {
+        pct = Math.min(100, pct + 5)
+        emit('update_progress', { pct, received: Math.round((total * pct) / 100), total })
+        if (pct >= 100) { stopDl(); emit('update_ready', { version: '9.9.9' }) }
+      }, 300)
+      return ok(true)
+    },
+    cancel_update: () => { const was = dl !== null; stopDl(); return ok(was) },
+    skip_update: (v: string) => { settings.skipped_version = v; return ok(true) },
+    install_update: () => ok(true),
     get_settings: () => ok({ ...settings }),
     save_settings: (s: any) => { settings = { ...settings, ...s }; return ok({ ...settings }) },
   }
