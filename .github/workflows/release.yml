@@ -1,17 +1,40 @@
 name: Release
 
-# Push a tag like v1.0.0 to build the Windows app and publish a GitHub Release.
-# Run manually (Actions -> Release -> Run workflow) to just build and get the zip as an artifact.
+# Every push to main: read VERSION; if tag v<VERSION> does not exist yet, build the Windows app and
+# publish a GitHub Release (this also creates the tag). Same version again = nothing happens.
+# To ship a new version: bump the number in VERSION and push to main.
+# Manual run (Actions -> Release -> Run workflow) builds the zip as an artifact only, no release.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$(tr -d '[:space:]' < VERSION)"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] && ! gh release view "v$VER" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: check
+    if: needs.check.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,8 +64,7 @@ jobs:
 
       - name: Zip
         run: |
-          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev" }
-          Compress-Archive -Path dist\ScribSalmon -DestinationPath "ScribSalmon-$ver-windows-x64.zip"
+          Compress-Archive -Path dist\ScribSalmon -DestinationPath "ScribSalmon-v${{ needs.check.outputs.version }}-windows-x64.zip"
           Get-ChildItem *.zip
 
       - uses: actions/upload-artifact@v4
@@ -51,18 +73,19 @@ jobs:
           path: ScribSalmon-*.zip
 
   release:
-    if: github.ref_type == 'tag'
-    needs: build
+    needs: [check, build]
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: ScribSalmon-windows-x64
-      - name: Create GitHub Release
+      - name: Create GitHub Release (creates tag v<VERSION> on this commit)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" ScribSalmon-*.zip \
+          gh release create "v${{ needs.check.outputs.version }}" ScribSalmon-*.zip \
             --repo "${{ github.repository }}" \
-            --title "ScribSalmon ${{ github.ref_name }}" \
+            --target "${{ github.sha }}" \
+            --title "ScribSalmon v${{ needs.check.outputs.version }}" \
             --generate-notes

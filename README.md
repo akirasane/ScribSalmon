@@ -139,14 +139,9 @@ tools/             make_icons.py - renders assets/logo.svg to PNGs, .ico and the
 ## CI / releases
 
 - [`ci.yml`](.github/workflows/ci.yml) - on every push/PR: TypeScript check + UI build, Python deps install + byte-compile.
-- [`release.yml`](.github/workflows/release.yml) - on a `v*` tag: builds the UI, packages the app with PyInstaller ([`ScribSalmon.spec`](ScribSalmon.spec)), zips it and publishes a GitHub Release with auto-generated notes.
+- [`release.yml`](.github/workflows/release.yml) - on every push to `main`: reads [`VERSION`](VERSION); if release `v<VERSION>` does not exist yet it builds the UI, packages the app with PyInstaller ([`ScribSalmon.spec`](ScribSalmon.spec)), zips it and publishes a GitHub Release (tag created automatically) with generated notes. Same version = nothing happens.
 
-Cut a release:
-
-```powershell
-git tag v1.0.1
-git push origin v1.0.1
-```
+Cut a release: bump `VERSION` (e.g. `1.0.1`), commit, push to `main`. That's it.
 
 Build the package locally:
 
