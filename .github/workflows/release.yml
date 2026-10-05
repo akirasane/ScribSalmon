@@ -88,15 +88,23 @@ jobs:
           Copy-Item THIRD_PARTY_NOTICES.txt dist\ScribSalmon\ -Force
           Copy-Item LICENSE dist\ScribSalmon\ -Force
 
+      - name: Build installer
+        run: ./installer/build-installer.ps1 -Version "${{ needs.check.outputs.version }}"
+
       - name: Zip and checksum
         run: |
+          $v = "${{ needs.check.outputs.version }}"
           # the spec already copies the exe.config; this is a harmless safety net
           Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\ -Force
-          $zip = "ScribSalmon-v${{ needs.check.outputs.version }}-windows-x64.zip"
+          $zip = "ScribSalmon-v$v-windows-x64.zip"
           Compress-Archive -Path dist\ScribSalmon -DestinationPath $zip
-          $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "$h  $zip" | Set-Content -Path SHA256SUMS.txt -Encoding ascii
-          Get-ChildItem ScribSalmon-*.zip, SHA256SUMS.txt
+          $setup = "ScribSalmon-Setup-$v.exe"
+          Copy-Item "installer\Output\$setup" $setup
+          # LF line endings, no BOM: `<hash>  <name>` (two spaces) so `sha256sum -c` and the in-app updater parse it
+          $lines = foreach ($f in $zip, $setup) { '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), $f }
+          $text = ($lines -join "`n") + "`n"
+          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), $text, [Text.UTF8Encoding]::new($false))
+          Get-ChildItem ScribSalmon-*.zip, ScribSalmon-Setup-*.exe, SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -104,6 +112,7 @@ jobs:
           name: ScribSalmon-windows-x64
           path: |
             ScribSalmon-*.zip
+            ScribSalmon-Setup-*.exe
             SHA256SUMS.txt
 
   release:
@@ -116,11 +125,15 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ScribSalmon-windows-x64
+      - name: Verify checksums
+        run: |
+          if grep -q $'\r' SHA256SUMS.txt; then echo "SHA256SUMS.txt must use LF line endings" >&2; exit 1; fi
+          sha256sum -c --strict SHA256SUMS.txt
       - name: Create GitHub Release (creates tag v<VERSION> on this commit)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ needs.check.outputs.version }}" ScribSalmon-*.zip SHA256SUMS.txt \
+          gh release create "v${{ needs.check.outputs.version }}" ScribSalmon-*.zip ScribSalmon-Setup-*.exe SHA256SUMS.txt \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "ScribSalmon v${{ needs.check.outputs.version }}" \
