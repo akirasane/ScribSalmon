@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Download, Pencil, Eye, Sparkles, SpellCheck, Trash2, Wand2 } from 'lucide-react'
-import type { Note, RecState, Settings } from '../types'
+import { Download, Pencil, Eye, Sparkles, SpellCheck, Trash2, Wand2, X } from 'lucide-react'
+import type { Backlog, Note, RecState, Settings, TaskKind } from '../types'
 import { fmtDate, fmtDuration } from '../lib'
 import SpotlightCard from './bits/SpotlightCard'
 import ShinyText from './bits/ShinyText'
@@ -15,7 +15,8 @@ interface Props {
   note: Note
   rec: RecState
   settings: Settings | null
-  summarizing: boolean
+  tasks: TaskKind[]
+  backlog?: Backlog
   busy: boolean
   status: string
   onEdit: (patch: Partial<Pick<Note, 'title' | 'transcript' | 'summary'>>) => void
@@ -29,7 +30,7 @@ interface Props {
   onDelete: () => void
   onRefine: () => void
   onReview: () => void
-  reviewing: boolean
+  onCancel: (kind: TaskKind) => void
 }
 
 export default function NoteView(p: Props) {
@@ -37,6 +38,11 @@ export default function NoteView(p: Props) {
   const [editSummary, setEditSummary] = useState(false)
   const tx = useRef<HTMLTextAreaElement>(null)
   const recordingHere = rec.id === note.id
+  const refining = p.tasks.includes('refine')
+  const summarizing = p.tasks.includes('summary')
+  const reviewing = p.tasks.includes('review')
+  const waiting = (p.backlog?.pending ?? 0) > 0
+  const behind = p.backlog?.seconds_behind ?? 0
 
   // keep the newest transcript line in view while recording
   useEffect(() => {
@@ -86,24 +92,47 @@ export default function NoteView(p: Props) {
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-3">
         <SpotlightCard className="min-h-0">
           <PanelHead title="Transcript">
-            <Button
-              className="h-8 px-3"
-              onClick={p.onRefine}
-              disabled={p.busy || recordingHere || !note.parts}
-              icon={<Wand2 className="size-3.5" />}
-              title="Re-transcribe the whole recording with full context (slower, more accurate)"
-            >
-              Refine
-            </Button>
-            <Button
-              className="h-8 px-3"
-              onClick={p.onReview}
-              disabled={p.reviewing || !note.transcript.trim()}
-              icon={<SpellCheck className="size-3.5" />}
-              title="Ask Claude which words look mis-heard, then choose the right ones"
-            >
-              {p.reviewing ? 'Checking…' : 'Check words'}
-            </Button>
+            {behind > 15 && (
+              <span className="rounded-full bg-card-hi px-2.5 py-1 text-[11.5px] text-mute" title="Transcription is running behind the audio">
+                {Math.round(behind)} s behind
+              </span>
+            )}
+            {refining ? (
+              <Button className="h-8 px-3" onClick={() => p.onCancel('refine')} icon={<X className="size-3.5" />} title="Stop refining and keep the current transcript">
+                Cancel refine
+              </Button>
+            ) : (
+              <Button
+                className="h-8 px-3"
+                onClick={p.onRefine}
+                disabled={recordingHere || waiting || !note.parts}
+                icon={<Wand2 className="size-3.5" />}
+                title={
+                  recordingHere
+                    ? 'Stop recording first'
+                    : waiting
+                      ? 'Wait for transcription to finish'
+                      : 'Re-transcribe the whole recording with full context (slower, more accurate)'
+                }
+              >
+                Refine
+              </Button>
+            )}
+            {reviewing ? (
+              <Button className="h-8 px-3" onClick={() => p.onCancel('review')} icon={<X className="size-3.5" />} title="Stop checking words">
+                Cancel check
+              </Button>
+            ) : (
+              <Button
+                className="h-8 px-3"
+                onClick={p.onReview}
+                disabled={refining || !note.transcript.trim()}
+                icon={<SpellCheck className="size-3.5" />}
+                title={refining ? 'Wait for Refine to finish (the transcript is being replaced)' : 'Ask Claude which words look mis-heard, then choose the right ones'}
+              >
+                Check words
+              </Button>
+            )}
           </PanelHead>
           <textarea
             ref={tx}
@@ -128,20 +157,27 @@ export default function NoteView(p: Props) {
             <Button variant="ghost" className="h-8 px-3" onClick={p.onExport} icon={<Download className="size-3.5" />}>
               Export
             </Button>
-            <Button
-              variant="primary"
-              className="h-8 px-4"
-              onClick={p.onSummarize}
-              disabled={p.summarizing || !note.transcript.trim()}
-              icon={<Sparkles className="size-3.5" />}
-            >
-              {p.summarizing ? 'Summarizing…' : 'Summarize'}
-            </Button>
+            {summarizing ? (
+              <Button className="h-8 px-4" onClick={() => p.onCancel('summary')} icon={<X className="size-3.5" />} title="Stop summarizing">
+                Cancel
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                className="h-8 px-4"
+                onClick={p.onSummarize}
+                disabled={refining || !note.transcript.trim()}
+                icon={<Sparkles className="size-3.5" />}
+                title={refining ? 'Wait for Refine to finish (the transcript is being replaced)' : undefined}
+              >
+                Summarize
+              </Button>
+            )}
           </PanelHead>
 
           <div className="selectable min-h-0 flex-1 overflow-y-auto px-5 pb-5">
             <AnimatePresence mode="wait" initial={false}>
-              {p.summarizing ? (
+              {summarizing ? (
                 <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-3 pt-1">
                   <ShinyText text="Claude is writing your meeting notes…" speed={2.2} className="text-[13px]" />
                   {[92, 78, 86, 60, 82].map((w, i) => (

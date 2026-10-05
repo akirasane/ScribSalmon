@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { Plus } from 'lucide-react'
 import { bridge, on } from './bridge'
 import { appendLine } from './lib'
-import type { Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, Toast } from './types'
+import type { Backlog, Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, TaskKind, Toast } from './types'
 import Aurora from './components/bits/Aurora'
 import BlurText from './components/bits/BlurText'
 import Logo from './components/Logo'
@@ -21,13 +21,13 @@ export default function App() {
   const [rec, setRec] = useState<RecState>({ id: null })
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('Ready')
-  const [summarizing, setSummarizing] = useState(false)
+  const [tasks, setTasks] = useState<Record<string, TaskKind[]>>({})
+  const [backlog, setBacklog] = useState<Record<string, Backlog>>({})
   const [settings, setSettings] = useState<Settings | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [ready, setReady] = useState(false)
-  const [reviewing, setReviewing] = useState(false)
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([])
   const [reviewOpen, setReviewOpen] = useState(false)
   const [confirmRefine, setConfirmRefine] = useState(false)
@@ -154,8 +154,19 @@ export default function App() {
           return { ...n, transcript: appendLine(n.transcript, text), transcript_rev: rev ?? n.transcript_rev }
         })
       }),
+      on('tasks', ({ id, tasks: kinds }: { id: string; tasks: TaskKind[] }) =>
+        setTasks((t) => {
+          const { [id]: _drop, ...rest } = t
+          return kinds.length ? { ...rest, [id]: kinds } : rest
+        }),
+      ),
+      on('backlog', ({ id, pending, seconds_behind }: { id: string } & Backlog) =>
+        setBacklog((b) => {
+          const { [id]: _drop, ...rest } = b
+          return pending > 0 ? { ...rest, [id]: { pending, seconds_behind } } : rest
+        }),
+      ),
       on('summary', ({ id, markdown, rev }: { id: string; markdown: string | null; rev?: number }) => {
-        setSummarizing(false)
         if (markdown && id === selRef.current)
           setNote((n) => (n && n.id === id ? { ...n, summary: markdown, summary_rev: rev ?? n.summary_rev } : n))
       }),
@@ -163,7 +174,6 @@ export default function App() {
         if (id === selRef.current) setNote((n) => (n && n.id === id ? { ...n, transcript: text, transcript_rev: rev ?? n.transcript_rev } : n))
       }),
       on('review', ({ id, items }: { id: string; items: ReviewItem[] | null }) => {
-        setReviewing(false)
         if (id !== selRef.current || !items) return
         if (items.length) {
           setReviewItems(items)
@@ -228,23 +238,51 @@ export default function App() {
   const checkWords = async () => {
     if (!note) return
     await flush()
-    setReviewing(true)
-    if (!(await guard(bridge.review(note.id, note.transcript)))) setReviewing(false)
+    await guard(bridge.review(note.id, note.transcript))
   }
 
+  // Apply fixes against the CURRENT transcript (it may have changed while the dialog was open):
+  // locate before+original+after (must be unique), else `original` if it occurs exactly once, else skip.
   const applyFixes = (fixes: [string, string][]) => {
-    if (!note) return
-    let t = note.transcript
-    let n = 0
-    for (const [from, to] of fixes) {
-      if (t.includes(from)) {
-        t = t.replace(from, () => to)
-        n++
-      }
+    const cur = noteRef.current
+    if (!cur) return
+    const t = cur.transcript
+    const unique = (needle: string) => {
+      const a = needle ? t.indexOf(needle) : -1
+      return a >= 0 && t.indexOf(needle, a + 1) < 0 ? a : -1
     }
-    edit({ transcript: t })
+    const used = new Set<number>()
+    const spans: { start: number; len: number; to: string }[] = []
+    let skipped = 0
+    for (const [from, to] of fixes) {
+      const k = reviewItems.findIndex((it, i) => !used.has(i) && it.original === from)
+      if (k >= 0) used.add(k)
+      const it = k >= 0 ? reviewItems[k] : undefined
+      let at = -1
+      if (it) {
+        const ctx = unique(it.before + it.original + it.after)
+        if (ctx >= 0) at = ctx + it.before.length
+      }
+      if (at < 0) at = unique(from)
+      if (at < 0) skipped++
+      else spans.push({ start: at, len: from.length, to })
+    }
+    spans.sort((a, b) => b.start - a.start) // right to left keeps earlier offsets valid
+    let out = t
+    let fixed = 0
+    let edge = Infinity
+    for (const s of spans) {
+      if (s.start + s.len > edge) {
+        skipped++ // overlaps a span we already replaced
+        continue
+      }
+      out = out.slice(0, s.start) + s.to + out.slice(s.start + s.len)
+      edge = s.start
+      fixed++
+    }
+    if (fixed) edit({ transcript: out })
     setReviewOpen(false)
-    toast('info', `Applied ${n} fix${n === 1 ? '' : 'es'}.`)
+    toast(skipped ? 'error' : 'info', `${fixed} fixed, ${skipped} skipped${skipped ? ' (text changed)' : ''}`)
   }
 
   const refine = async () => {
@@ -290,8 +328,11 @@ export default function App() {
   const summarize = async () => {
     if (!note) return
     await flush()
-    setSummarizing(true)
-    if (!(await guard(bridge.summarize(note.id, note.transcript)))) setSummarizing(false)
+    await guard(bridge.summarize(note.id, note.transcript))
+  }
+
+  const cancelTask = (kind: TaskKind) => {
+    if (note) void guard(bridge.cancel(kind, note.id))
   }
 
   return (
@@ -324,7 +365,8 @@ export default function App() {
                 note={note}
                 rec={stopping ? { ...rec, stopping } : rec}
                 settings={settings}
-                summarizing={summarizing}
+                tasks={tasks[note.id] ?? []}
+                backlog={backlog[note.id]}
                 busy={busy}
                 status={status}
                 onEdit={edit}
@@ -345,7 +387,7 @@ export default function App() {
                 onDelete={() => setConfirmDelete(true)}
                 onRefine={() => setConfirmRefine(true)}
                 onReview={checkWords}
-                reviewing={reviewing}
+                onCancel={cancelTask}
               />
             ) : (
               ready && (

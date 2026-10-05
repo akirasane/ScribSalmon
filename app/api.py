@@ -4,6 +4,7 @@ Each call returns {"ok": true, "data": ...} or {"ok": false, "error": "..."} so 
 has to deal with Python tracebacks.
 """
 import json
+import re
 import traceback
 import webbrowser
 from typing import Optional
@@ -12,6 +13,21 @@ from urllib.parse import urlparse
 import webview
 
 from .core import Controller
+
+
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename(title, fallback: str = "note", limit: int = 120) -> str:
+    """A Windows-safe file name stem for a note title (used as the export dialog's default name)."""
+    name = _BAD_CHARS.sub("-", title if isinstance(title, str) else "")
+    name = name[:limit].strip().rstrip(". ").strip()
+    if not name or name.strip("-") == "":
+        return fallback
+    if name.split(".")[0].strip().upper() in _RESERVED:
+        name = "_" + name
+    return name
 
 
 def _safe(fn):
@@ -73,7 +89,7 @@ class Api:
     @_safe
     def export_note(self, note_id):
         note = self._c.get_note(note_id)
-        res = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=f"{note['title']}.md",
+        res = self._window.create_file_dialog(webview.SAVE_DIALOG, save_filename=f"{safe_filename(note['title'])}.md",
                                               file_types=("Markdown (*.md)",))
         if not res:
             return None
@@ -91,7 +107,8 @@ class Api:
 
     @_safe
     def add_wav(self, note_id):
-        res = self._window.create_file_dialog(webview.OPEN_DIALOG, file_types=("WAV audio (*.wav)",))
+        res = self._window.create_file_dialog(
+            webview.OPEN_DIALOG, file_types=("Audio (*.wav;*.mp3;*.m4a;*.flac;*.ogg;*.mp4)",))
         if not res:
             return None
         return self._c.import_wav(note_id, res[0])
@@ -109,6 +126,10 @@ class Api:
     @_safe
     def review(self, note_id, transcript):
         return self._c.review(note_id, transcript)
+
+    @_safe
+    def cancel(self, kind, note_id):
+        return self._c.cancel(kind, note_id)
 
     # ---- settings
     @_safe

@@ -41,6 +41,8 @@ export interface Settings {
   openai_key_source: 'saved' | 'env' | 'unreadable' | ''
   claude_model: string
   default_prompt: string
+  /** App version, read-only, from the backend */
+  version?: string
 }
 
 export interface Toast {
@@ -55,6 +57,15 @@ export interface ReviewItem {
   reason: string
   before: string
   after: string
+  /** position of `original` in the transcript when it was checked */
+  index?: number
+}
+
+export type TaskKind = 'refine' | 'summary' | 'review'
+
+export interface Backlog {
+  pending: number
+  seconds_behind: number
 }
 
 export type SettingsPatch = Partial<Settings> & { clear_anthropic_key?: boolean; clear_openai_key?: boolean }

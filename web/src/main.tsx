@@ -18,7 +18,14 @@ document.addEventListener('auxclick', onLink, true)
 // dropping a file onto the window must not navigate to it
 window.addEventListener('dragover', (e) => e.preventDefault())
 window.addEventListener('drop', (e) => e.preventDefault())
-if (!import.meta.env.DEV) window.addEventListener('contextmenu', (e) => e.preventDefault())
+// keep the native context menu where copy/paste is useful (text fields, selections); block it elsewhere
+if (!import.meta.env.DEV)
+  window.addEventListener('contextmenu', (e) => {
+    const t = e.target as Element | null
+    if (t?.closest?.('input, textarea, [contenteditable=""], [contenteditable="true"]')) return
+    if (window.getSelection()?.toString()) return
+    e.preventDefault()
+  })
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -1,12 +1,13 @@
 """UI-independent controller: recording, transcription queue, summaries, notes CRUD.
 
 Talks to the UI only through `emit(event, payload)`; works with any front-end.
-Events: text{id,text,rev} transcript{id,text,rev} summary{id,markdown,rev}
-        status str busy bool error str
+Events: text{id,text,rev} transcript{id,text,rev} summary{id,markdown|None,rev}
+        review{id,items|None} status str busy bool error str
+        tasks{id,tasks:[refine|summary|review]} (per-note running long tasks)
+        backlog{id,pending,seconds_behind} (audio waiting to be transcribed)
         recording{id|None} level float notes (list changed)
 """
 import queue
-import shutil
 import threading
 import time
 from functools import reduce
@@ -14,13 +15,17 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import sessions
+from . import transcribe as _transcribe
 from .audio import Recorder
 from .sessions import Session
+from .errors import Cancelled
 from .settings import SECRETS, Settings, coerce_patch
 from .summarize import DEFAULT_PROMPT, review, summarize
 from .transcribe import SAMPLE_RATE, load_wav, make_engine
+from .version import VERSION
 
 ENGINE_KEYS = {"engine", "whisper_model", "whisper_custom", "openai_key", "device"}
+TASK_KINDS = ("refine", "summary", "review")
 _SECRET_ENV = {"anthropic_key": "ANTHROPIC_API_KEY", "openai_key": "OPENAI_API_KEY"}
 
 
@@ -42,6 +47,10 @@ class Controller:
         self.rec_session: Optional[Session] = None
         self.rec_path: Optional[Path] = None
         self.rec_started = 0.0
+        self._tasks: dict = {}    # note id -> set of running kinds (refine/summary/review)
+        self._pending: dict = {}  # note id -> audio chunks queued/being transcribed
+        self._behind: dict = {}   # note id -> seconds of audio queued/being transcribed
+        self._cancels: dict = {}  # (note id, kind) -> threading.Event
 
     # ---------------------------------------------------------------- whisper context hint
     def _prompt_for(self, note_id: Optional[str]) -> Optional[str]:
@@ -80,6 +89,84 @@ class Controller:
     def _rev(self, nid: str) -> dict:
         with self.lock:
             return self._revs.setdefault(nid, {"t": 0, "s": 0, "replaced": 0, "tail": []})
+
+    # ---------------------------------------------------------------- task / backlog tracking
+    def _busy_now(self) -> bool:
+        return any(self._tasks.values()) or any(v > 0 for v in self._pending.values())
+
+    def _emit_busy(self):
+        with self.lock:
+            b = self._busy_now()
+        self.emit("busy", b)
+
+    def _begin_task(self, nid: str, kind: str) -> threading.Event:
+        with self.lock:
+            if kind in self._tasks.get(nid, ()):
+                raise ValueError("That is already running for this note.")
+            ev = threading.Event()
+            self._tasks.setdefault(nid, set()).add(kind)
+            self._cancels[(nid, kind)] = ev
+            kinds = sorted(self._tasks[nid])
+        self.emit("tasks", {"id": nid, "tasks": kinds})
+        self.emit("busy", True)
+        return ev
+
+    def _end_task(self, nid: str, kind: str):
+        with self.lock:
+            ks = self._tasks.get(nid)
+            if ks is not None:
+                ks.discard(kind)
+                if not ks:
+                    del self._tasks[nid]
+            self._cancels.pop((nid, kind), None)
+            kinds = sorted(self._tasks.get(nid, ()))
+        self.emit("tasks", {"id": nid, "tasks": kinds})
+        self._emit_busy()
+
+    def _is_refining(self, nid: str) -> bool:
+        with self.lock:
+            return "refine" in self._tasks.get(nid, ())
+
+    def _add_pending(self, nid: str, n: int, secs: float = 0.0):
+        with self.lock:
+            self._pending[nid] = self._pending.get(nid, 0) + n
+            self._behind[nid] = max(0.0, self._behind.get(nid, 0.0) + secs)
+            if self._pending[nid] <= 0:
+                self._pending.pop(nid, None)
+                self._behind.pop(nid, None)
+            pend, behind = self._pending.get(nid, 0), self._behind.get(nid, 0.0)
+        self.emit("backlog", {"id": nid, "pending": pend, "seconds_behind": round(behind, 1)})
+        self._emit_busy()
+
+    def _enqueue(self, nid: str, item):
+        """The only way audio enters the queue: keeps per-note pending/backlog counters exact.
+        `item` None is an end-of-batch marker and is not counted."""
+        if item is None:
+            self.q.put((nid, None))
+            return
+        self._add_pending(nid, 1, self._secs(item))
+        self.q.put((nid, item))
+
+    @staticmethod
+    def _secs(audio) -> float:
+        try:
+            return len(audio) / SAMPLE_RATE
+        except TypeError:
+            return 0.0
+
+    def cancel(self, kind: str, note_id: str) -> bool:
+        """Ask a running refine/summary/review on this note to stop. False if none is running."""
+        if kind not in TASK_KINDS:
+            raise ValueError("Unknown task.")
+        if not sessions.is_valid_id(note_id):
+            raise ValueError("Invalid note id.")
+        with self.lock:
+            ev = self._cancels.get((note_id, kind))
+        if ev is None:
+            return False
+        ev.set()
+        self.emit("status", "Cancelling…")
+        return True
 
     # ---------------------------------------------------------------- engine
     def _get_engine(self):
@@ -121,13 +208,10 @@ class Controller:
 
     # ---------------------------------------------------------------- notes
     def list_notes(self, query: str = "") -> list:
-        q = (query or "").strip().lower()
         out = []
         for s in sessions.list_all():
-            if q and q not in s.title.lower() and q not in s.read("transcript.txt").lower() \
-                    and q not in s.read("summary.md").lower():
-                continue
-            out.append(self._brief(s))
+            if s.matches(query):  # cached per file mtime/size, so typing in the search box stays cheap
+                out.append(self._brief(s))
         return out
 
     def get_note(self, note_id: str) -> dict:
@@ -210,6 +294,7 @@ class Controller:
             else:
                 d[k + "_source"] = "saved" if saved else ("env" if os.environ.get(env) else "")
         d["default_prompt"] = DEFAULT_PROMPT.strip()
+        d["version"] = VERSION
         return d
 
     def _apply_settings(self, data: dict) -> set:
@@ -258,10 +343,12 @@ class Controller:
             note_id, audio = self.q.get()
             if audio is None:
                 self.q.task_done()
-                if self.q.empty():
+                with self.lock:
+                    idle = self.q.empty() and not any(v > 0 for v in self._pending.values())
+                if idle:
                     self.emit("status", "Transcription finished.")
-                    self.emit("busy", False)
                     self.emit("notes", None)
+                self._emit_busy()
                 continue
             eng = None
             try:
@@ -289,21 +376,23 @@ class Controller:
                 self._reset_engine(only=eng)
             finally:
                 self.q.task_done()
-                if self.q.empty():
-                    self.emit("busy", False)
+                self._add_pending(note_id, -1, -self._secs(audio))
 
     def _transcribe_file(self, note_id: str, path: Path):
         self._ensure_worker()
+        self._add_pending(note_id, 1)  # token: keeps the note busy while the file is decoded and fed
 
         def feed():
             try:
                 a = load_wav(path)
                 step = 30 * SAMPLE_RATE
                 for i in range(0, len(a), step):
-                    self.q.put((note_id, a[i:i + step]))
-                self.q.put((note_id, None))
+                    self._enqueue(note_id, a[i:i + step])
+                self._enqueue(note_id, None)
             except Exception as e:
                 self.emit("error", f"Transcription of {Path(path).name} failed: {e}")
+            finally:
+                self._add_pending(note_id, -1)
 
         threading.Thread(target=feed, daemon=True).start()
         self.emit("status", "Transcribing file…")
@@ -320,12 +409,14 @@ class Controller:
             if not (self.s.use_system or self.s.use_mic):
                 raise ValueError("Pick system audio and/or microphone.")
             s = self._session(note_id)
+            if self._is_refining(s.dir.name):
+                raise ValueError("Wait for Refine to finish (or cancel it) before recording.")
             self._ensure_worker()
             path = s.next_part_path()
             live = self.s.live_transcript
             nid = s.dir.name
             rec = Recorder(path, self.s.use_system, self.s.use_mic,
-                           on_chunk=(lambda a: self.q.put((nid, a))) if live else (lambda a: None),
+                           on_chunk=(lambda a: self._enqueue(nid, a)) if live else (lambda a: None),
                            on_error=lambda m: self.emit("error", m),
                            on_dead=lambda: threading.Thread(target=self._on_rec_dead, args=(rec,),
                                                             daemon=True).start())
@@ -362,7 +453,7 @@ class Controller:
             rec.stop()
             nid = sess.dir.name
             if live:
-                self.q.put((nid, None))
+                self._enqueue(nid, None)
             else:
                 self._transcribe_file(nid, path)
             self.emit("recording", {"id": None})
@@ -374,23 +465,32 @@ class Controller:
                 return {}
 
     def import_wav(self, note_id: str, path: str) -> dict:
+        """Add an audio file (WAV/MP3/M4A/FLAC/OGG...) to a note and transcribe it."""
         s = self._session(note_id)
+        if self._is_refining(s.dir.name):
+            raise ValueError("Wait for Refine to finish (or cancel it) before importing audio.")
         dest = s.next_part_path("import")
-        shutil.copy2(path, dest)
+        _transcribe.import_audio(Path(path), dest)  # ValueError (and nothing left behind) if unusable
         self._transcribe_file(s.dir.name, dest)
         self.emit("notes", None)
         return self._brief(s)
 
     def retranscribe(self, note_id: str) -> bool:
         """Re-run speech-to-text over the WHOLE recording(s) with full context (more accurate than
-        live 6 s chunks). Replaces the transcript."""
+        live 6 s chunks) and replace the transcript. Refused while the note is recording, still has
+        audio waiting in the transcription queue, or is already refining. Cancellable: a cancelled
+        refine keeps the old transcript."""
         s = self._session(note_id)
+        nid = s.dir.name
         if self.rec_session and self.rec_session.dir.resolve() == s.dir.resolve():
             raise ValueError("Stop recording first.")
         parts = s.parts
         if not parts:
             raise ValueError("This note has no recording to refine.")
-        self.emit("busy", True)
+        with self.lock:
+            if self._pending.get(nid, 0) > 0:
+                raise ValueError("Wait for transcription to finish.")
+        cancel = self._begin_task(nid, "refine")
 
         def go():
             eng = None
@@ -399,64 +499,74 @@ class Controller:
                 lang = None if self.s.language == "auto" else self.s.language
                 texts = []
                 for i, p in enumerate(parts, 1):
+                    if cancel.is_set():
+                        raise Cancelled()
                     self.emit("status", f"Refining transcript… recording {i}/{len(parts)} (this can take a while)")
                     a = load_wav(p)
                     with self.engine_lock:
-                        t = eng.transcribe(a, lang, self._prompt_for(None), long_form=True)
+                        t = eng.transcribe(a, lang, self._prompt_for(None), long_form=True,
+                                           should_stop=cancel.is_set)
                     if t:
                         texts.append(t)
+                if cancel.is_set():
+                    raise Cancelled()
                 full = "\n".join(texts).strip() + "\n"
                 with self.lock:
                     s.write("transcript.txt", full)
-                    st = self._rev(s.dir.name)
+                    st = self._rev(nid)
                     st["t"] += 1
                     st["replaced"] = st["t"]
                     st["tail"].clear()
                     rev = st["t"]
                 self.emit("transcript", {"id": note_id, "text": full, "rev": rev})
                 self.emit("status", "Transcript refined.")
+            except Cancelled:
+                self.emit("status", "Cancelled")  # the old transcript is untouched
             except Exception as e:
                 self.emit("error", f"Refine failed: {e}")
                 self._reset_engine(only=eng)
             finally:
-                self.emit("busy", False)
+                self._end_task(nid, "refine")
 
         threading.Thread(target=go, daemon=True).start()
         return True
 
     # ---------------------------------------------------------------- Thai/word review
     def review(self, note_id: str, transcript: str) -> bool:
-        self._session(note_id)
+        nid = self._session(note_id).dir.name
         transcript = transcript if isinstance(transcript, str) else ""
-        self.emit("busy", True)
+        cancel = self._begin_task(nid, "review")
         self.emit("status", "Checking transcript for garbled words…")
 
         def go():
             try:
                 items = review(transcript, self.s.summary_backend, self.s.effective_anthropic_key,
-                               self.s.claude_model, self.s.vocabulary)
+                               self.s.claude_model, self.s.vocabulary, cancel=cancel)
                 self.emit("review", {"id": note_id, "items": items})
                 self.emit("status", f"Found {len(items)} phrase(s) to check." if items else "Nothing suspicious found.")
+            except Cancelled:
+                self.emit("review", {"id": note_id, "items": None})
+                self.emit("status", "Cancelled")
             except Exception as e:
                 self.emit("review", {"id": note_id, "items": None})
                 self.emit("error", f"Review failed: {e}")
             finally:
-                self.emit("busy", False)
+                self._end_task(nid, "review")
 
         threading.Thread(target=go, daemon=True).start()
         return True
 
     # ---------------------------------------------------------------- summary
     def summarize(self, note_id: str, transcript: str) -> None:
-        self._session(note_id)
+        nid = self._session(note_id).dir.name
         transcript = transcript if isinstance(transcript, str) else ""
-        self.emit("busy", True)
+        cancel = self._begin_task(nid, "summary")
         self.emit("status", "Summarizing with Claude… (CLI can take ~30 s)")
 
         def go():
             try:
                 md = summarize(transcript, self.s.summary_backend, self.s.effective_anthropic_key,
-                               self.s.claude_model, self.s.summary_prompt)
+                               self.s.claude_model, self.s.summary_prompt, cancel=cancel)
                 rev = 0
                 with self.lock:
                     d = self._dir(note_id)
@@ -467,11 +577,14 @@ class Controller:
                         rev = st["s"]
                 self.emit("summary", {"id": note_id, "markdown": md, "rev": rev})
                 self.emit("status", "Summary done.")
+            except Cancelled:
+                self.emit("summary", {"id": note_id, "markdown": None})
+                self.emit("status", "Cancelled")
             except Exception as e:
                 self.emit("summary", {"id": note_id, "markdown": None})
                 self.emit("error", f"Summary failed: {e}")
             finally:
-                self.emit("busy", False)
+                self._end_task(nid, "summary")
 
         threading.Thread(target=go, daemon=True).start()
 
