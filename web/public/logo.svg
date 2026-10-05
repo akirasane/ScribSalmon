@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#ffa690"/>
+      <stop offset="1" stop-color="#ff5f55"/>
+    </linearGradient>
+    <linearGradient id="yolk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff3c4"/>
+      <stop offset="0.55" stop-color="#ffd96b"/>
+      <stop offset="1" stop-color="#ffb938"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- salmon tile -->
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <rect x="3" y="3" width="250" height="250" rx="55" fill="none" stroke="#fff" stroke-opacity="0.22" stroke-width="2"/>
+  <g transform="translate(0 7)">
+  <!-- folded omelette -->
+  <path d="M36 168 C36 98 76 58 128 58 C180 58 220 98 220 168 C220 181 209 188 197 188 L59 188 C47 188 36 181 36 168 Z" fill="url(#yolk)"/>
+  <path d="M58 150 C62 108 90 80 124 76" fill="none" stroke="url(#shine)" stroke-width="9" stroke-linecap="round"/>
+  <!-- sound-wave bars -->
+  <g fill="#6b2a22">
+    <rect x="76"  y="116" width="15" height="44"  rx="7.5"/>
+    <rect x="101" y="98"  width="15" height="80"  rx="7.5"/>
+    <rect x="121" y="84"  width="15" height="96"  rx="7.5"/>
+    <rect x="146" y="98"  width="15" height="80"  rx="7.5"/>
+    <rect x="171" y="116" width="15" height="44"  rx="7.5"/>
+  </g>
+  </g>
+</svg>

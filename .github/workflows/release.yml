@@ -1,0 +1,68 @@
+name: Release
+
+# Push a tag like v1.0.0 to build the Windows app and publish a GitHub Release.
+# Run manually (Actions -> Release -> Run workflow) to just build and get the zip as an artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python deps
+        run: |
+          (Get-Content requirements.txt) | Where-Object { $_ -notmatch '^PySide6' } | Set-Content req-ci.txt
+          pip install -r req-ci.txt pyinstaller
+
+      - name: Package with PyInstaller
+        run: pyinstaller ScribSalmon.spec --noconfirm
+
+      - name: Zip
+        run: |
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev" }
+          Compress-Archive -Path dist\ScribSalmon -DestinationPath "ScribSalmon-$ver-windows-x64.zip"
+          Get-ChildItem *.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScribSalmon-windows-x64
+          path: ScribSalmon-*.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ScribSalmon-windows-x64
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" ScribSalmon-*.zip \
+            --repo "${{ github.repository }}" \
+            --title "ScribSalmon ${{ github.ref_name }}" \
+            --generate-notes

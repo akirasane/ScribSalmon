@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+__pycache__/
+*.wav
+web/node_modules/
+build/
+dist/
+web/dist/
+*.log
+.vscode/
+.idea/
