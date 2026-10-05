@@ -1,6 +1,6 @@
 faster-whisper>=1.2.1
 soundcard>=0.4.6
-numpy>=1.26,<2.3
+numpy>=2.5.3,<2.6
 anthropic>=0.40
 openai>=1.40
 sounddevice>=0.5.6
