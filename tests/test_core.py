@@ -260,3 +260,45 @@ def test_transcribe_file_start_seconds_skips_audio(ctl, wav_file):
     c._transcribe_file(nid, wav_file(seconds=3.0), start_seconds=1.0)
     assert wait_for(lambda: seen)
     assert seen == [32000]
+
+
+def test_save_settings_ignores_internal_fields(ctl):
+    c, _ = ctl
+    c.save_settings({"last_update_check": 123.0, "skipped_version": "9.9.9", "check_updates": False})
+    assert c.s.last_update_check == 0.0
+    assert c.s.skipped_version == ""
+    assert c.s.check_updates is False
+
+
+def test_save_update_fields_only_touches_internal(ctl):
+    c, _ = ctl
+    c._save_update_fields({"last_update_check": 42, "skipped_version": "1.5.0", "language": "th", "engine": "openai"})
+    assert c.s.last_update_check == 42.0
+    assert c.s.skipped_version == "1.5.0"
+    assert c.s.language == "auto" and c.s.engine == "local"
+    from app.settings import Settings
+    assert Settings.load().skipped_version == "1.5.0"
+
+
+def test_get_settings_reports_install_mode(ctl):
+    c, _ = ctl
+    assert c.get_settings()["install_mode"] in ("installed", "portable", "source")
+
+
+def test_updater_is_idle_tracks_recording_and_work(ctl):
+    c, _ = ctl
+    assert c._is_idle() is True
+    c._add_pending("n1", 1)
+    assert c._is_idle() is False
+    c._add_pending("n1", -1)
+    assert c._is_idle() is True
+    c.recorder = object()
+    assert c._is_idle() is False
+    c.recorder = None
+
+
+def test_start_recording_refused_when_quitting(ctl):
+    c, _ = ctl
+    c.updater.quitting = True
+    with pytest.raises(ValueError, match="update"):
+        c.start_recording("whatever", {})

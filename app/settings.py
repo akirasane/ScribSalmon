@@ -1,6 +1,8 @@
 import json
 import logging
+import math
 import os
+import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -77,6 +79,9 @@ class Settings:
     openai_key: str = ""
     claude_model: str = "claude-sonnet-5-5"
     device: str = "auto"  # auto | cpu | cuda
+    check_updates: bool = True  # look for a newer release on launch (at most once a day)
+    last_update_check: float = 0.0  # internal: epoch seconds of the last successful check
+    skipped_version: str = ""  # internal: release the user chose to skip ("" = none)
 
     @property
     def effective_anthropic_key(self) -> str:
@@ -191,6 +196,11 @@ def _has_plaintext_secret(text: str) -> bool:
 ENUMS = {"engine": {"local", "openai"}, "language": {"auto", "th", "en"},
          "summary_backend": {"auto", "cli", "api"}, "device": {"auto", "cpu", "cuda"}}
 SECRETS = {"anthropic_key", "openai_key"}
+INTERNAL = {"last_update_check", "skipped_version"}  # written by the updater, never by the settings UI
+_SEMVER = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$")
 FIELD_TYPES = {f.name: type(f.default) for f in fields(Settings)}
 
 
@@ -205,7 +215,14 @@ def coerce_patch(data, strict: bool = True) -> dict:
         if k not in FIELD_TYPES:
             continue
         typ = FIELD_TYPES[k]
-        ok = isinstance(v, bool) if typ is bool else (isinstance(v, typ) and not isinstance(v, bool))
+        if typ is float:  # JS numbers arrive as int when whole
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+            if ok:
+                v = float(v)
+        else:
+            ok = isinstance(v, bool) if typ is bool else (isinstance(v, typ) and not isinstance(v, bool))
+        if ok and k == "skipped_version" and v != "" and not (len(v) <= 64 and _SEMVER.match(v)):
+            ok = False
         if ok and k in ENUMS and v not in ENUMS[k]:
             ok = False
         if not ok:

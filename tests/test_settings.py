@@ -83,3 +83,42 @@ def test_encrypt_failure_falls_back_to_plaintext(data_dirs, monkeypatch):
     s.openai_key = "k"
     s.save()
     assert _file()["openai_key"] == "k"
+
+
+def test_update_field_defaults(data_dirs):
+    s = Settings.load()
+    assert s.check_updates is True
+    assert s.last_update_check == 0.0
+    assert s.skipped_version == ""
+    assert settings.INTERNAL == {"last_update_check", "skipped_version"}
+
+
+def test_float_field_accepts_int_and_converts():
+    assert settings.coerce_patch({"last_update_check": 1700000000}) == {"last_update_check": 1700000000.0}
+    out = settings.coerce_patch({"last_update_check": 12})["last_update_check"]
+    assert isinstance(out, float)
+    assert settings.coerce_patch({"last_update_check": 1.5}) == {"last_update_check": 1.5}
+
+
+@pytest.mark.parametrize("bad", ["12", True, -1, -0.5, float("nan"), float("inf"), None])
+def test_float_field_rejects_bad(bad):
+    with pytest.raises(ValueError):
+        settings.coerce_patch({"last_update_check": bad})
+    assert settings.coerce_patch({"last_update_check": bad}, strict=False) == {}
+
+
+def test_check_updates_is_bool_only():
+    assert settings.coerce_patch({"check_updates": False}) == {"check_updates": False}
+    with pytest.raises(ValueError):
+        settings.coerce_patch({"check_updates": 1})
+
+
+@pytest.mark.parametrize("v", ["", "1.4.0", "10.0.1", "1.4.0-rc.1", "1.4.0+build.5"])
+def test_skipped_version_accepts(v):
+    assert settings.coerce_patch({"skipped_version": v}) == {"skipped_version": v}
+
+
+@pytest.mark.parametrize("v", ["dev", "1.4", "01.2.3", "v1.4.0", "1.4.0 ", "1.4.0-", "x" * 100, 5, None])
+def test_skipped_version_rejects(v):
+    with pytest.raises(ValueError):
+        settings.coerce_patch({"skipped_version": v})

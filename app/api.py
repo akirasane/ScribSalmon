@@ -5,6 +5,7 @@ has to deal with Python tracebacks.
 """
 import json
 import re
+import threading
 import traceback
 import webbrowser
 from typing import Optional
@@ -139,6 +140,33 @@ class Api:
     @_safe
     def save_settings(self, data):
         return self._c.save_settings(data)
+
+    # ---- updates
+    @_safe
+    def check_for_updates(self, force=False):
+        return self._c.updater.check(force is True)
+
+    @_safe
+    def download_update(self):
+        return self._c.updater.start_download()
+
+    @_safe
+    def cancel_update(self):
+        return self._c.updater.cancel_download()
+
+    @_safe
+    def skip_update(self, version):
+        if not isinstance(version, str):
+            raise ValueError("Invalid version.")
+        self._c.updater.skip(version)
+        return True
+
+    @_safe
+    def install_update(self):
+        ok = self._c.updater.install()
+        if ok and self._window:
+            threading.Timer(0.3, self._window.destroy).start()  # let the UI flush, then the close flow runs
+        return ok
 
     @_safe
     def open_external(self, url):

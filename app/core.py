@@ -7,6 +7,7 @@ Events: text{id,text,rev} transcript{id,text,rev} summary{id,markdown|None,rev}
         backlog{id,pending,seconds_behind} (audio waiting to be transcribed)
         recording{id|None} level float notes (list changed)
 """
+import logging
 import queue
 import threading
 import time
@@ -19,12 +20,14 @@ from . import transcribe as _transcribe
 from .audio import Recorder
 from .sessions import Session
 from .errors import Cancelled
-from .settings import SECRETS, Settings, coerce_patch
+from .settings import INTERNAL, SECRETS, Settings, coerce_patch
+from .updater import Updater, install_mode
 from .summarize import DEFAULT_PROMPT, review, summarize
 from .transcribe import SAMPLE_RATE, load_wav, make_engine
 from .version import VERSION
 
 ENGINE_KEYS = {"engine", "whisper_model", "whisper_custom", "openai_key", "device"}
+log = logging.getLogger(__name__)
 BACKLOG_FALLBACK_SECS = 120.0
 TASK_KINDS = ("refine", "summary", "review")
 _SECRET_ENV = {"anthropic_key": "ANTHROPIC_API_KEY", "openai_key": "OPENAI_API_KEY"}
@@ -53,6 +56,28 @@ class Controller:
         self._pending: dict = {}  # note id -> audio chunks queued/being transcribed
         self._behind: dict = {}   # note id -> seconds of audio queued/being transcribed
         self._cancels: dict = {}  # (note id, kind) -> threading.Event
+        self.updater = Updater(self.emit, lambda: self.s, self._save_update_fields, self._is_idle)
+        threading.Thread(target=self._cleanup_updates, name="update-cleanup", daemon=True).start()
+
+    def _is_idle(self) -> bool:
+        return self.recorder is None and not self._busy_now()
+
+    def _cleanup_updates(self):
+        try:
+            self.updater.cleanup_stale()
+        except Exception:  # noqa: BLE001 - housekeeping must never matter
+            log.info("update cleanup failed", exc_info=True)
+
+    def _save_update_fields(self, fields: dict) -> None:
+        """Persist updater-owned settings (last check / skipped version); nothing else is touched."""
+        patch = {k: v for k, v in coerce_patch(fields, strict=True).items() if k in INTERNAL}
+        changed = False
+        for k, v in patch.items():
+            if getattr(self.s, k) != v:
+                setattr(self.s, k, v)
+                changed = True
+        if changed:
+            self.s.save()
 
     # ---------------------------------------------------------------- whisper context hint
     def _prompt_for(self, note_id: Optional[str]) -> Optional[str]:
@@ -297,6 +322,7 @@ class Controller:
                 d[k + "_source"] = "saved" if saved else ("env" if os.environ.get(env) else "")
         d["default_prompt"] = DEFAULT_PROMPT.strip()
         d["version"] = VERSION
+        d["install_mode"] = install_mode()
         return d
 
     def _apply_settings(self, data: dict) -> set:
@@ -326,7 +352,7 @@ class Controller:
     def save_settings(self, data: dict) -> dict:
         if not isinstance(data, dict):
             raise ValueError("Invalid settings.")
-        data = dict(data)
+        data = {k: v for k, v in data.items() if k not in INTERNAL}  # the UI cannot set updater state
         prompt = data.get("summary_prompt")
         if isinstance(prompt, str) and prompt.strip() == DEFAULT_PROMPT.strip():
             data["summary_prompt"] = ""
@@ -403,6 +429,8 @@ class Controller:
 
     # ---------------------------------------------------------------- recording
     def start_recording(self, note_id: str, opts: dict) -> dict:
+        if self.updater.quitting:
+            raise ValueError("ScribSalmon is installing an update and will restart.")
         with self.rec_lock:
             if self.recorder:
                 raise ValueError("Already recording.")
