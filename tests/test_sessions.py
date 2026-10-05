@@ -83,3 +83,56 @@ def test_load_legacy_folder_named_by_timestamp(data_dirs):
     d.mkdir()
     s = sessions.load(d)
     assert s.title == "Meeting 2025-03-04 05:06"
+
+
+def _put_wav(s, wav_file, seconds=1.0, name="rec_001.wav"):
+    (s.dir / name).write_bytes(wav_file(seconds=seconds).read_bytes())
+
+
+def test_duration_cache_hit_does_not_open_wav(data_dirs, wav_file, monkeypatch):
+    import wave
+    s = sessions.create()
+    _put_wav(s, wav_file, 2.0)
+    assert s.duration == pytest.approx(2.0, abs=0.01)
+    assert "parts_sig" in (s.dir / "meta.json").read_text(encoding="utf-8")
+
+    def boom(*a, **k):
+        raise AssertionError("wav opened")
+    monkeypatch.setattr(wave, "open", boom)
+    fresh = sessions.load(s.dir)
+    assert fresh.duration == pytest.approx(2.0, abs=0.01)
+    assert s.duration == pytest.approx(2.0, abs=0.01)
+
+
+def test_duration_cache_invalidates_when_part_changes(data_dirs, wav_file):
+    s = sessions.create()
+    _put_wav(s, wav_file, 1.0)
+    assert sessions.load(s.dir).duration == pytest.approx(1.0, abs=0.01)
+    _put_wav(s, wav_file, 3.0)
+    assert sessions.load(s.dir).duration == pytest.approx(3.0, abs=0.01)
+    _put_wav(s, wav_file, 1.0, "rec_002.wav")
+    assert sessions.load(s.dir).duration == pytest.approx(4.0, abs=0.01)
+
+
+def test_title_save_keeps_duration_cache(data_dirs, wav_file):
+    s = sessions.create()
+    _put_wav(s, wav_file, 1.0)
+    s = sessions.load(s.dir)
+    s.duration
+    s.title = "renamed"
+    s.save_meta()
+    again = sessions.load(s.dir)
+    assert again.title == "renamed" and again.meta.get("duration") is not None
+
+
+def test_search_cache(data_dirs, monkeypatch):
+    s = sessions.create()
+    s.write("transcript.txt", "Hello World")
+    assert s.matches("hello") and not s.matches("zzz") and s.matches("")
+    reads = []
+    orig = sessions.Session.read
+    monkeypatch.setattr(sessions.Session, "read", lambda self, n: reads.append(n) or orig(self, n))
+    assert s.matches("world")
+    assert reads == []  # served from cache
+    s.write("transcript.txt", "Goodbye moon")
+    assert s.matches("moon") and not s.matches("world")

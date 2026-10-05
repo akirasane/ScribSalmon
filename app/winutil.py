@@ -1,5 +1,7 @@
 """Small Windows helpers. Import-safe on any OS: ctypes.windll is only touched inside functions."""
 import sys
+from pathlib import Path
+from typing import Optional
 
 
 def dark_titlebar_hwnd(hwnd: int) -> None:
@@ -24,3 +26,44 @@ def set_app_user_model_id(app_id: str) -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
+
+
+FOLDERID_DOCUMENTS = "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}"
+
+
+def known_folder(folder_id_guid: str) -> Optional[Path]:
+    """Resolve a Windows Known Folder (honors OneDrive/redirected locations). None if unavailable."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+        u = uuid.UUID(folder_id_guid)
+        guid = GUID(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+        get = ctypes.windll.shell32.SHGetKnownFolderPath
+        get.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                        ctypes.POINTER(ctypes.c_void_p)]
+        get.restype = ctypes.HRESULT
+        free = ctypes.windll.ole32.CoTaskMemFree
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = None
+        ptr = ctypes.c_void_p()
+        try:
+            get(ctypes.byref(guid), 0, None, ctypes.byref(ptr))
+            return Path(ctypes.wstring_at(ptr.value)) if ptr.value else None
+        finally:
+            if ptr.value:
+                free(ptr)
+    except Exception:
+        return None
+
+
+def known_documents() -> Path:
+    """The user's Documents folder (may be redirected to OneDrive); falls back to ~/Documents."""
+    return known_folder(FOLDERID_DOCUMENTS) or Path.home() / "Documents"

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from . import dpapi
+from . import winutil
 from .fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -27,8 +28,37 @@ def _resolve(new: Path, old: Path) -> Path:
 _appdata = Path(os.environ.get("APPDATA", Path.home()))
 APP_DIR = _resolve(_appdata / APP_NAME, _appdata / LEGACY_NAME)
 SETTINGS_FILE = APP_DIR / "settings.json"
-_docs = Path.home() / "Documents"
-SESSIONS_DIR = _resolve(_docs / APP_NAME, _docs / LEGACY_NAME)
+
+
+def _has_notes(d: Path) -> bool:
+    try:
+        return any(c.is_dir() and ((c / "meta.json").exists() or any(c.glob("*.wav"))) for c in d.iterdir())
+    except OSError:
+        return False
+
+
+def resolve_notes_dir(env, known: Path, home: Path) -> Path:
+    """Where notes live. SCRIBSALMON_DATA_DIR wins; else <Documents known folder>/ScribSalmon, except that an
+    existing populated ~/Documents/ScribSalmon is kept when the known folder differs and has no ScribSalmon yet
+    (never moved automatically across volumes / OneDrive)."""
+    override = (env.get("SCRIBSALMON_DATA_DIR") or "").strip()
+    if override:
+        return Path(override)
+    new = (known or home / "Documents") / APP_NAME
+    old = home / "Documents" / APP_NAME
+    if old != new and not new.exists() and old.exists() and _has_notes(old):
+        return old
+    return new
+
+
+def _init_notes_dir() -> Path:
+    d = resolve_notes_dir(os.environ, winutil.known_documents(), Path.home())
+    if os.environ.get("SCRIBSALMON_DATA_DIR", "").strip():
+        return d
+    return _resolve(d, d.with_name(LEGACY_NAME))
+
+
+SESSIONS_DIR = _init_notes_dir()
 
 
 @dataclass
