@@ -127,7 +127,6 @@ app/summarize.py   Claude CLI or Anthropic API: summary prompt + "Check words" r
 app/sessions.py    one folder per note
 app/settings.py    settings.json + data folder resolution
 web/src            React + TypeScript + Tailwind v4 UI (bridge.ts = Python bridge, mock.ts = browser fake)
-main_qt.py         previous PySide6 UI, kept as a fallback (needs PySide6 from requirements.txt)
 tools/             make_icons.py - renders assets/logo.svg to PNGs, .ico and the web favicon
 ```
 

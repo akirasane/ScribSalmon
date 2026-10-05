@@ -2,7 +2,6 @@
 
     python main.py          run the built UI (web/dist)
     python main.py --dev    use the Vite dev server (http://127.0.0.1:5173) with devtools
-Old PySide6 UI: python main_qt.py
 """
 import sys
 import threading
@@ -12,7 +11,7 @@ from pathlib import Path
 
 import webview
 
-from app import theme
+from app import winutil
 from app.api import Api
 
 # PyInstaller unpacks bundled data under sys._MEIPASS; from source it is the folder of this file
@@ -83,6 +82,11 @@ def _harden(window, allowed: str) -> None:
 
 
 def main() -> int:
+    if "--selftest" in sys.argv:
+        from app import selftest
+        i = sys.argv.index("--selftest")
+        out = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
+        return selftest.run(out)
     dev = "--dev" in sys.argv
     if dev:
         url = "http://127.0.0.1:5173"
@@ -92,12 +96,7 @@ def main() -> int:
         print("UI not built. Run:  cd web && npm install && npm run build", file=sys.stderr)
         return 1
 
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
-        except Exception:
-            pass
+    winutil.set_app_user_model_id(APP_ID)
 
     api = Api()
     window = webview.create_window(
@@ -109,7 +108,7 @@ def main() -> int:
     def on_shown():
         _set_window_icon(window)
         try:
-            theme.dark_titlebar_hwnd(int(window.native.Handle.ToInt64()))
+            winutil.dark_titlebar_hwnd(int(window.native.Handle.ToInt64()))
         except Exception:
             pass
 
@@ -135,7 +134,7 @@ def main() -> int:
 
     def on_closing():
         if state["done"]:
-            (getattr(api, "_shutdown", None) or api.shutdown)()
+            api._shutdown()
             return True
         if state["busy"]:
             return False

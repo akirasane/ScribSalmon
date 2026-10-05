@@ -4,7 +4,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-extend-exclude = ["web", ".venv", "build", "dist", "app/ui.py", "app/widgets.py", "main_qt.py"]  # legacy Qt UI is removed in chore/remove-qt-ui
+extend-exclude = ["web", ".venv", "build", "dist"]
 
 [tool.ruff.lint]
 select = ["F", "E9"]

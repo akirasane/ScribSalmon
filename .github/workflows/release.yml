@@ -56,8 +56,7 @@ jobs:
           cache: pip
       - name: Install Python deps
         run: |
-          (Get-Content requirements.txt) | Where-Object { $_ -notmatch '^PySide6' } | Set-Content req-ci.txt
-          pip install -r req-ci.txt pyinstaller
+          pip install -r requirements.txt pyinstaller
 
       - name: Package with PyInstaller
         run: pyinstaller ScribSalmon.spec --noconfirm
