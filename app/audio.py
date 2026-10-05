@@ -31,6 +31,30 @@ def _com_uninit(owned: bool) -> None:
             pass
 
 
+def pick_cut(block_rms: list, min_blocks: int = 40, max_blocks: int = 100,
+             silence_rms: float = 0.01) -> Optional[int]:
+    """Choose where to cut a live chunk, working on 0.1 s blocks of pending audio.
+
+    Returns None (keep accumulating) or the exclusive end index: the chunk is blocks[:cut].
+    Nothing is cut before `min_blocks`. Candidate cuts are after the blocks in
+    [min_blocks-1, min(n, max_blocks)-1]; the quietest one wins, the LAST of equal minima.
+    Before `max_blocks` the cut is taken only when that block is a real pause (rms below
+    `silence_rms`, or well below the average of the window); at `max_blocks` it is forced.
+    """
+    n = len(block_rms)
+    if n < min_blocks or min_blocks < 1:
+        return None
+    hi = min(n, max_blocks)
+    window = block_rms[min_blocks - 1:hi]
+    lowest = min(window)
+    idx = min_blocks - 1 + max(i for i, v in enumerate(window) if v == lowest)
+    if n >= max_blocks:
+        return idx + 1
+    if lowest < silence_rms or lowest < 0.3 * (sum(window) / len(window)):
+        return idx + 1
+    return None
+
+
 class _LoopSource(threading.Thread):
     """System audio via WASAPI loopback (soundcard). All COM work happens inside this thread."""
 
@@ -98,7 +122,11 @@ class _MicSource(threading.Thread):
 
 
 class Recorder:
-    """Records to a WAV file; calls on_chunk(np.float32 array) every `chunk_sec` of audio."""
+    """Records to a WAV file; calls on_chunk(np.float32 array) with live chunks cut at pauses.
+
+    `chunk_sec` is the nominal chunk length: chunks are at least 2/3 of it and at most 5/3 of it
+    (default 6.0 -> min 4 s, hard max 10 s), cut at the quietest 0.1 s block (see pick_cut).
+    The WAV always receives the full audio."""
 
     def __init__(self, wav_path: Path, use_system: bool, use_mic: bool,
                  on_chunk: Callable[[np.ndarray], None], on_error: Callable[[str], None],
@@ -168,9 +196,10 @@ class Recorder:
     def _run(self):
         sources = self._sources
         wf = self._wf
-        pending = []
-        pending_len = 0
-        target = int(self.chunk_sec * SAMPLE_RATE)
+        blocks: list = []   # (samples, rms) 0.1 s blocks since the last cut
+        carry = np.zeros(0, np.float32)
+        min_blocks = max(1, round(self.chunk_sec * 10 * 2 / 3))
+        max_blocks = max(min_blocks + 1, round(self.chunk_sec * 10 * 5 / 3))
         dead = False
         try:
             while not self._stop.is_set():
@@ -183,11 +212,16 @@ class Recorder:
                 if len(mixed):
                     self.level = float(np.sqrt(np.mean(mixed ** 2)))
                     wf.writeframes((np.clip(mixed, -1, 1) * 32767).astype(np.int16).tobytes())
-                    pending.append(mixed)
-                    pending_len += len(mixed)
-                    if pending_len >= target:
-                        self.on_chunk(np.concatenate(pending))
-                        pending, pending_len = [], 0
+                    carry = np.concatenate([carry, mixed]) if len(carry) else mixed
+                    while len(carry) >= BLOCK:
+                        blk, carry = carry[:BLOCK], carry[BLOCK:]
+                        blocks.append((blk, float(np.sqrt(np.mean(blk ** 2)))))
+                    while True:
+                        cut = pick_cut([r for _, r in blocks], min_blocks, max_blocks)
+                        if cut is None:
+                            break
+                        self.on_chunk(np.concatenate([b_[0] for b_ in blocks[:cut]]))
+                        blocks = blocks[cut:]
                 if all(not s.is_alive() for s in sources):
                     dead = True
                     break
@@ -195,9 +229,10 @@ class Recorder:
             tail = self._mix([s.drain() for s in sources])
             if len(tail):
                 wf.writeframes((np.clip(tail, -1, 1) * 32767).astype(np.int16).tobytes())
-                pending.append(tail)
-            if pending:
-                self.on_chunk(np.concatenate(pending))
+                carry = np.concatenate([carry, tail]) if len(carry) else tail
+            rest = [b_[0] for b_ in blocks] + ([carry] if len(carry) else [])
+            if rest:
+                self.on_chunk(np.concatenate(rest))
         finally:
             try:
                 wf.close()

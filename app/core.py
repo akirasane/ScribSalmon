@@ -25,6 +25,7 @@ from .transcribe import SAMPLE_RATE, load_wav, make_engine
 from .version import VERSION
 
 ENGINE_KEYS = {"engine", "whisper_model", "whisper_custom", "openai_key", "device"}
+BACKLOG_FALLBACK_SECS = 120.0
 TASK_KINDS = ("refine", "summary", "review")
 _SECRET_ENV = {"anthropic_key": "ANTHROPIC_API_KEY", "openai_key": "OPENAI_API_KEY"}
 
@@ -47,6 +48,7 @@ class Controller:
         self.rec_session: Optional[Session] = None
         self.rec_path: Optional[Path] = None
         self.rec_started = 0.0
+        self.rec_state: dict = {"fallback": False, "fed": 0.0}
         self._tasks: dict = {}    # note id -> set of running kinds (refine/summary/review)
         self._pending: dict = {}  # note id -> audio chunks queued/being transcribed
         self._behind: dict = {}   # note id -> seconds of audio queued/being transcribed
@@ -378,13 +380,15 @@ class Controller:
                 self.q.task_done()
                 self._add_pending(note_id, -1, -self._secs(audio))
 
-    def _transcribe_file(self, note_id: str, path: Path):
+    def _transcribe_file(self, note_id: str, path: Path, start_seconds: float = 0.0):
         self._ensure_worker()
         self._add_pending(note_id, 1)  # token: keeps the note busy while the file is decoded and fed
 
         def feed():
             try:
                 a = load_wav(path)
+                if start_seconds > 0:
+                    a = a[int(start_seconds * SAMPLE_RATE):]
                 step = 30 * SAMPLE_RATE
                 for i in range(0, len(a), step):
                     self._enqueue(note_id, a[i:i + step])
@@ -415,8 +419,10 @@ class Controller:
             path = s.next_part_path()
             live = self.s.live_transcript
             nid = s.dir.name
+            state = {"fallback": False, "fed": 0.0}
+            self.rec_state = state
             rec = Recorder(path, self.s.use_system, self.s.use_mic,
-                           on_chunk=(lambda a: self._enqueue(nid, a)) if live else (lambda a: None),
+                           on_chunk=(lambda a: self._live_chunk(nid, state, a)) if live else (lambda a: None),
                            on_error=lambda m: self.emit("error", m),
                            on_dead=lambda: threading.Thread(target=self._on_rec_dead, args=(rec,),
                                                             daemon=True).start())
@@ -433,6 +439,19 @@ class Controller:
             self.emit("status", "Recording…" if live else "Recording (transcribe after Stop)…")
             self.emit("recording", {"id": nid, "started": self.rec_started})
             return {"id": nid, "started": self.rec_started}
+
+    def _live_chunk(self, nid: str, state: dict, audio):
+        """Feed a live chunk unless transcription is hopelessly behind (then Stop transcribes the rest)."""
+        if state["fallback"]:
+            return
+        with self.lock:
+            behind = self._behind.get(nid, 0.0)
+        if behind > BACKLOG_FALLBACK_SECS:
+            state["fallback"] = True
+            self.emit("status", "Live transcription fell behind; the rest will be transcribed after Stop.")
+            return
+        state["fed"] += self._secs(audio)
+        self._enqueue(nid, audio)
 
     def _level_loop(self, rec: Recorder):
         while self.recorder is rec:
@@ -452,7 +471,10 @@ class Controller:
             self.rec_session = None
             rec.stop()
             nid = sess.dir.name
-            if live:
+            state = self.rec_state
+            if live and state.get("fallback"):
+                self._transcribe_file(nid, path, start_seconds=state["fed"])
+            elif live:
                 self._enqueue(nid, None)
             else:
                 self._transcribe_file(nid, path)

@@ -215,3 +215,48 @@ def test_list_notes_search_uses_cached_matches(data_dirs):
     assert [x["id"] for x in c.list_notes("budget")] == [n["id"]]
     assert c.list_notes("nonexistent-term") == []
     assert len(c.list_notes("")) == 1
+
+
+def test_backlog_fallback_stops_live_feed_and_transcribes_rest(ctl, wav_file, monkeypatch):
+    c, rec = ctl
+    nid = c.create_note()["id"]
+    path = wav_file(seconds=3.0)
+    state = {"fallback": False, "fed": 0.0}
+    chunk = np.zeros(16000, np.float32)
+    calls = []
+    monkeypatch.setattr(c, "_enqueue", lambda n, a: calls.append(a))
+    c._live_chunk(nid, state, chunk)
+    assert state["fed"] == 1.0 and len(calls) == 1
+    c._behind[nid] = 121.0
+    c._live_chunk(nid, state, chunk)
+    c._live_chunk(nid, state, chunk)
+    assert state["fallback"] and len(calls) == 1 and state["fed"] == 1.0
+    assert any("fell behind" in s for s in rec.of("status"))
+    assert not rec.of("error")
+
+    class R:
+        def stop(self):
+            pass
+
+    got = {}
+    monkeypatch.setattr(c, "_transcribe_file",
+                        lambda n, p, start_seconds=0.0: got.update(n=n, p=p, s=start_seconds))
+    c.recorder, c.rec_session, c.rec_path, c.rec_live, c.rec_state = R(), c._session(nid), path, True, state
+    c.stop_recording()
+    assert got == {"n": nid, "p": path, "s": 1.0}
+
+
+def test_transcribe_file_start_seconds_skips_audio(ctl, wav_file):
+    c, rec = ctl
+    seen = []
+
+    class E(FakeEngine):
+        def transcribe(self, audio, language, prompt=None, **kw):
+            seen.append(len(audio))
+            return ""
+
+    c.engine = E()
+    nid = c.create_note()["id"]
+    c._transcribe_file(nid, wav_file(seconds=3.0), start_seconds=1.0)
+    assert wait_for(lambda: seen)
+    assert seen == [32000]
