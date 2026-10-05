@@ -3,5 +3,5 @@ soundcard>=0.4.4
 numpy>=1.26,<2.3
 anthropic>=0.40
 openai>=1.40
-sounddevice>=0.4.7
+sounddevice>=0.5.6
 pywebview>=5.3
