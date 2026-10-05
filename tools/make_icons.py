@@ -1,7 +1,7 @@
 r"""Render assets/logo.svg into PNGs, a multi-size Windows .ico and the web favicon.
 
     .venv\Scripts\python tools\make_icons.py
-Needs only PySide6 (QtSvg). The .ico is written by hand with PNG-compressed entries.
+Needs only PySide6 (QtSvg): pip install -r requirements-dev.txt. The .ico is written by hand with PNG-compressed entries.
 """
 import shutil
 import struct

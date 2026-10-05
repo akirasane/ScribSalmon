@@ -30,9 +30,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install deps (without the legacy PySide6 UI)
+      - name: Install deps
         run: |
-          (Get-Content requirements.txt) | Where-Object { $_ -notmatch '^PySide6' } | Set-Content req-ci.txt
-          pip install -r req-ci.txt
+          pip install -r requirements.txt
       - name: Byte-compile
         run: python -m compileall -q app main.py tools
