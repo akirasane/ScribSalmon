@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { RotateCcw } from 'lucide-react'
-import type { Settings, SettingsPatch } from '../types'
+import type { Settings, SettingsPatch, UpdateCheck } from '../types'
 import { Button, Modal, Select, Toggle } from './ui'
 
 interface Props {
@@ -8,6 +8,8 @@ interface Props {
   settings: Settings | null
   onClose: () => void
   onSave: (s: SettingsPatch) => Promise<void>
+  /** Forced update check; resolves with the result, rejects with a readable message */
+  onCheckUpdates: () => Promise<UpdateCheck>
 }
 
 const input =
@@ -32,13 +34,19 @@ function keyPlaceholder(source: Settings['anthropic_key_source'], envVar: string
   return 'Not set'
 }
 
-export default function SettingsModal({ open, settings, onClose, onSave }: Props) {
+export default function SettingsModal({ open, settings, onClose, onSave, onCheckUpdates }: Props) {
   const [d, setD] = useState<Settings | null>(settings)
   const [saving, setSaving] = useState(false)
   const [clear, setClear] = useState<Record<KeyName, boolean>>({ anthropic: false, openai: false })
 
+  const [checking, setChecking] = useState(false)
+  const [checkMsg, setCheckMsg] = useState('')
+  const [lastCheck, setLastCheck] = useState(0)
+
   useEffect(() => {
     if (open) {
+      setCheckMsg('')
+      setLastCheck(settings?.last_update_check ?? 0)
       setD(settings)
       setClear({ anthropic: false, openai: false })
     }
@@ -46,6 +54,20 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
 
   if (!d) return <Modal open={false} onClose={onClose}>{null}</Modal>
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setD({ ...d, [k]: v })
+
+  const checkNow = async () => {
+    setChecking(true)
+    setCheckMsg('')
+    try {
+      const r = await onCheckUpdates()
+      setLastCheck(Date.now() / 1000)
+      setCheckMsg(r.available && r.latest ? `v${r.latest} available` : 'Up to date')
+    } catch (e) {
+      setCheckMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setChecking(false)
+    }
+  }
 
   return (
     <Modal open={open} onClose={onClose} width="max-w-2xl">
@@ -180,6 +202,20 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
           />
         </div>
 
+        <div className="space-y-2">
+          <span className="text-[11px] font-semibold tracking-[0.12em] text-mute uppercase">Updates</span>
+          <Toggle label="Check for updates on launch" checked={d.check_updates ?? true} onChange={(v) => set('check_updates', v)} />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button className="h-8 px-3" disabled={checking} onClick={checkNow}>
+              {checking ? 'Checking…' : 'Check now'}
+            </Button>
+            {checkMsg && <span className="text-[12.5px] text-ink">{checkMsg}</span>}
+            <span className="text-[12px] text-mute">
+              {lastCheck > 0 ? `Last checked ${new Date(lastCheck * 1000).toLocaleString()}` : 'Never checked'}
+            </span>
+          </div>
+        </div>
+
         <div className="flex items-center gap-2 pt-1">
           <span className="text-[12px] text-mute">ScribSalmon v{settings?.version ?? 'dev'}</span>
           <div className="flex-1" />
@@ -193,7 +229,7 @@ export default function SettingsModal({ open, settings, onClose, onSave }: Props
                 const patch: Record<string, unknown> = {}
                 for (const k of Object.keys(d) as (keyof Settings)[]) {
                   if (k === 'anthropic_key' || k === 'openai_key') continue
-                  if (k === 'default_prompt' || k === 'version' || k.startsWith('has_') || k.endsWith('_source')) continue
+                  if (k === 'default_prompt' || k === 'version' || k === 'last_update_check' || k === 'skipped_version' || k === 'install_mode' || k.startsWith('has_') || k.endsWith('_source')) continue
                   if (d[k] !== settings?.[k]) patch[k] = d[k]
                 }
                 if (d.anthropic_key.trim()) patch.anthropic_key = d.anthropic_key.trim()

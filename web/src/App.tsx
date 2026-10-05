@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { Plus } from 'lucide-react'
 import { bridge, on } from './bridge'
 import { appendLine } from './lib'
-import type { Backlog, Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, TaskKind, Toast } from './types'
+import type { Backlog, Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, TaskKind, Toast, UpdateCheck, UpdateInfo, UpdatePhase } from './types'
 import Aurora from './components/bits/Aurora'
 import BlurText from './components/bits/BlurText'
 import Logo from './components/Logo'
@@ -11,6 +11,7 @@ import Sidebar from './components/Sidebar'
 import NoteView from './components/NoteView'
 import SettingsModal from './components/SettingsModal'
 import ReviewModal from './components/ReviewModal'
+import UpdateBanner from './components/UpdateBanner'
 import { Button, Modal, Toasts } from './components/ui'
 
 export default function App() {
@@ -32,6 +33,10 @@ export default function App() {
   const [reviewOpen, setReviewOpen] = useState(false)
   const [confirmRefine, setConfirmRefine] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [updPhase, setUpdPhase] = useState<UpdatePhase>('idle')
+  const [updInfo, setUpdInfo] = useState<UpdateInfo | null>(null)
+  const [updPct, setUpdPct] = useState(0)
+  const [updError, setUpdError] = useState('')
 
   const noteRef = useRef<Note | null>(null)
   noteRef.current = note
@@ -131,6 +136,12 @@ export default function App() {
     [flush, guard],
   )
 
+  const showUpdate = useCallback((info: UpdateInfo) => {
+    setUpdInfo(info)
+    // never knock a download/install that is already in progress back to "available"
+    setUpdPhase((p) => (p === 'downloading' || p === 'ready' || p === 'installing' ? p : 'available'))
+  }, [])
+
   // ---- initial load + backend events
   useEffect(() => {
     ;(async () => {
@@ -143,6 +154,12 @@ export default function App() {
         if (n) setNote(n)
       }
       setReady(true)
+      // silent launch check: the backend throttles it and swallows network errors
+      bridge
+        .checkForUpdates(false)
+        .then(() => bridge.getSettings())
+        .then(setSettings)
+        .catch(() => {})
     })()
 
     const offs = [
@@ -179,6 +196,18 @@ export default function App() {
           setReviewItems(items)
           setReviewOpen(true)
         } else toast('info', 'No unclear words found.')
+      }),
+      on('update_available', (u: Omit<UpdateInfo, 'can_install'>) =>
+        showUpdate({ ...u, can_install: u.install_mode !== 'source' && u.size != null }),
+      ),
+      on('update_progress', ({ pct }: { pct: number }) => {
+        setUpdPhase((p) => (p === 'available' || p === 'downloading' ? 'downloading' : p))
+        setUpdPct(Math.max(0, Math.min(100, Math.round(pct))))
+      }),
+      on('update_ready', () => setUpdPhase('ready')),
+      on('update_error', ({ message }: { message: string }) => {
+        setUpdError(message)
+        setUpdPhase('error')
       }),
       on('status', (m: string) => setStatus(m)),
       on('busy', (b: boolean) => setBusy(b)),
@@ -292,6 +321,39 @@ export default function App() {
     await guard(bridge.retranscribe(note.id))
   }
 
+  const startUpdate = async () => {
+    setUpdError('')
+    setUpdPct(0)
+    setUpdPhase('downloading')
+    if (!(await guard(bridge.downloadUpdate()))) setUpdPhase('available')
+  }
+
+  const cancelUpdate = async () => {
+    await guard(bridge.cancelUpdate())
+    setUpdPhase('available')
+  }
+
+  const skipUpdate = async () => {
+    if (!updInfo) return
+    if ((await guard(bridge.skipUpdate(updInfo.version))) !== undefined) setUpdPhase('idle')
+  }
+
+  const installUpdate = async () => {
+    setUpdPhase('installing')
+    await flush()
+    // on success the backend closes the window a moment later
+    if (!(await guard(bridge.installUpdate()))) setUpdPhase('ready')
+  }
+
+  // Settings > Check now: a manual check ignores the 24 h throttle and a skipped version
+  const checkUpdatesNow = async (): Promise<UpdateCheck> => {
+    const r = await bridge.checkForUpdates(true)
+    if (r.available && r.latest) {
+      showUpdate({ version: r.latest, notes_url: r.notes_url ?? '', size: r.size, install_mode: r.install_mode, can_install: r.can_install })
+    }
+    return r
+  }
+
   const openSettings = async () => {
     if (!settings) {
       const s = await guard(bridge.getSettings())
@@ -348,7 +410,7 @@ export default function App() {
         onSettings={openSettings}
       />
 
-      <main className="relative min-w-0 flex-1 overflow-hidden">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* React Bits Aurora, very faint, fades out downward */}
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-80 opacity-[0.28]"
@@ -357,7 +419,20 @@ export default function App() {
           <Aurora />
         </div>
 
-        <div className="relative h-full px-8 pt-7 pb-4">
+        <UpdateBanner
+          phase={updPhase}
+          info={updInfo}
+          pct={updPct}
+          error={updError}
+          blocked={rec.id !== null || busy}
+          onUpdate={startUpdate}
+          onCancel={cancelUpdate}
+          onSkip={skipUpdate}
+          onDismiss={() => setUpdPhase('idle')}
+          onInstall={installUpdate}
+        />
+
+        <div className="relative min-h-0 flex-1 px-8 pt-7 pb-4">
           <AnimatePresence mode="wait" initial={false}>
             {note ? (
               <NoteView
@@ -415,6 +490,7 @@ export default function App() {
         open={settingsOpen}
         settings={settings}
         onClose={() => setSettingsOpen(false)}
+        onCheckUpdates={checkUpdatesNow}
         onSave={async (s) => {
           const saved = await guard(bridge.saveSettings(s))
           if (saved) setSettings(saved)

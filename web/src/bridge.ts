@@ -1,4 +1,4 @@
-import type { TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch } from './types'
+import type { TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch, UpdateCheck } from './types'
 
 type Res<T> = { ok: true; data: T } | { ok: false; error: string }
 type Listener = (payload: any) => void
@@ -75,5 +75,10 @@ export const bridge = {
   cancel: (kind: TaskKind, id: string) => call<boolean>('cancel', kind, id),
   getSettings: () => call<Settings>('get_settings'),
   saveSettings: (s: SettingsPatch) => call<Settings>('save_settings', s),
+  checkForUpdates: (force = false) => call<UpdateCheck>('check_for_updates', force),
+  downloadUpdate: () => call<boolean>('download_update'),
+  cancelUpdate: () => call<boolean>('cancel_update'),
+  skipUpdate: (version: string) => call<boolean>('skip_update', version),
+  installUpdate: () => call<boolean>('install_update'),
   openExternal: (url: string) => call<boolean>('open_external', url),
 }
