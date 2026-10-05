@@ -141,6 +141,11 @@ tools/             make_icons.py - renders assets/logo.svg to PNGs, .ico and the
 - [`ci.yml`](.github/workflows/ci.yml) - on every push/PR: TypeScript check + UI build, Python deps install + byte-compile.
 - [`release.yml`](.github/workflows/release.yml) - on every push to `main`: reads [`VERSION`](VERSION); if release `v<VERSION>` does not exist yet it builds the UI, packages the app with PyInstaller ([`ScribSalmon.spec`](ScribSalmon.spec)), zips it and publishes a GitHub Release (tag created automatically) with generated notes. Same version = nothing happens.
 
+- CI also has a `package` job that builds the frozen app with PyInstaller and runs `--selftest` (plain and with Mark-of-the-Web).
+- Each release ships `SHA256SUMS.txt` (SHA-256 of the zip) and the zip contains `THIRD_PARTY_NOTICES.txt` (licenses of bundled dependencies, generated with `pip-licenses`) plus the project `LICENSE`.
+- All GitHub Actions are pinned to full commit SHAs; [Dependabot](.github/dependabot.yml) opens weekly grouped update PRs for `github-actions`, `pip` and `npm` (`/web`).
+- Recommended branch protection for `main`: require the status checks `web`, `python` and `package` to pass before merging.
+
 Cut a release: bump `VERSION` (e.g. `1.0.1`), commit, push to `main`. That's it.
 
 Build the package locally:
