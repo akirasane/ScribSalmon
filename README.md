@@ -35,14 +35,24 @@
 
 > Only record meetings where **all attendees consent**.
 
-## Download (no setup)
+## Download
 
-1. Go to the [**Releases**](https://github.com/akirasane/ScribSalmon/releases/latest) page.
-2. Download `ScribSalmon-vX.Y.Z-windows-x64.zip` and extract it anywhere.
-3. Run `ScribSalmon.exe`.
+Go to the [**Releases**](https://github.com/akirasane/ScribSalmon/releases/latest) page and pick one:
+
+**Installer (recommended)** - `ScribSalmon-Setup-X.Y.Z.exe`
+
+1. Run it. It installs for the current user only (`%LOCALAPPDATA%\Programs\ScribSalmon`, no admin rights) and adds a Start menu entry (desktop shortcut optional).
+2. Start ScribSalmon from the Start menu. Future versions are offered inside the app (see [Updates](#updates)).
+3. To uninstall use *Settings -> Apps -> ScribSalmon*. Your notes (`Documents\ScribSalmon`) are kept; the uninstaller asks whether to also delete settings (including saved API keys) in `%APPDATA%\ScribSalmon`.
+
+Upgrading from 1.3.0 (zip): 1.3.0 cannot update itself, so install 1.4.0 once with the installer. Your notes and settings are picked up automatically; you can then delete the old extracted folder.
+
+**Portable zip** - `ScribSalmon-vX.Y.Z-windows-x64.zip`: extract anywhere and run `ScribSalmon.exe`. No updater; download new versions yourself.
+
+`SHA256SUMS.txt` on each release lists the SHA-256 of both files (`Get-FileHash <file>` to compare).
 
 Requirements: Windows 10/11 x64 with the **Microsoft Edge WebView2 Runtime** (preinstalled on Windows 11 and current Windows 10).
-Windows SmartScreen may warn because the exe is unsigned - *More info -> Run anyway*.
+Windows SmartScreen may warn because the installer and exe are unsigned - *More info -> Run anyway*.
 
 For summaries you need **one** of:
 - [Claude Code](https://claude.com/claude-code) installed and logged in (`claude` on `PATH`), or
@@ -116,6 +126,16 @@ npm run dev                         # http://127.0.0.1:5173 - works in a normal 
 Each note folder contains `meta.json`, `rec_001.wav ...`, `transcript.txt`, `summary.md`.
 Old `VoiceRecog` folders are migrated automatically on first launch.
 
+The installed app lives in `%LOCALAPPDATA%\Programs\ScribSalmon`; nothing is written there at runtime, so uninstalling or updating never touches your notes or settings.
+
+## Updates
+
+- On launch, **at most once a day**, and only if **Settings -> Check for updates on launch** is on, ScribSalmon makes one unauthenticated HTTPS GET to `api.github.com/repos/akirasane/ScribSalmon/releases/latest` with the User-Agent `ScribSalmon/<version>`. GitHub sees your IP address and the app version; nothing else is sent. Use **Check now** in Settings to check on demand.
+- If a newer release exists, a banner offers **Update**, **What's new**, **Skip this version** or dismiss. Nothing is downloaded until you click **Update**.
+- The installer is downloaded only from this project's GitHub release, verified against its SHA-256 (from `SHA256SUMS.txt` and the GitHub asset digest), and only run when you click **Restart & update** (not while recording or transcribing). ScribSalmon then closes, the installer runs, and the app relaunches.
+- Zip/portable copies and source runs are not self-updated: the banner only links to the release page. The same applies if a release has no installer.
+- **Security note:** the installer is unsigned, so updates are always user-initiated and never silent. The checksum verifies that the download is intact and matches what the release published; it does not prove who built it (both come from the same GitHub release).
+
 ## Architecture
 
 ```
@@ -139,10 +159,10 @@ tools/             make_icons.py - renders assets/logo.svg to PNGs, .ico and the
 ## CI / releases
 
 - [`ci.yml`](.github/workflows/ci.yml) - on every push/PR: TypeScript check + UI build, Python deps install + byte-compile.
-- [`release.yml`](.github/workflows/release.yml) - on every push to `main`: reads [`VERSION`](VERSION); if release `v<VERSION>` does not exist yet it builds the UI, packages the app with PyInstaller ([`ScribSalmon.spec`](ScribSalmon.spec)), zips it and publishes a GitHub Release (tag created automatically) with generated notes. Same version = nothing happens.
+- [`release.yml`](.github/workflows/release.yml) - on every push to `main`: reads [`VERSION`](VERSION); if release `v<VERSION>` does not exist yet it builds the UI, packages the app with PyInstaller ([`ScribSalmon.spec`](ScribSalmon.spec)), zips it, builds the Inno Setup installer ([`installer/ScribSalmon.iss`](installer/ScribSalmon.iss)) and publishes a GitHub Release (tag created automatically) with generated notes. Same version = nothing happens.
 
-- CI also has a `package` job that builds the frozen app with PyInstaller and runs `--selftest` (plain and with Mark-of-the-Web).
-- Each release ships `SHA256SUMS.txt` (SHA-256 of the zip) and the zip contains `THIRD_PARTY_NOTICES.txt` (licenses of bundled dependencies, generated with `pip-licenses`) plus the project `LICENSE`.
+- CI also has a `package` job that builds the frozen app with PyInstaller and runs `--selftest` (plain and with Mark-of-the-Web), then builds the installer and tests it end to end (silent install, selftest of the installed app, upgrade in place, uninstall keeps notes and settings).
+- Each release ships `ScribSalmon-v<version>-windows-x64.zip`, `ScribSalmon-Setup-<version>.exe` and `SHA256SUMS.txt` (SHA-256 of both, LF line endings, `<hash>  <name>`; the release job verifies it with `sha256sum -c` before publishing). The zip contains `THIRD_PARTY_NOTICES.txt` (licenses of bundled dependencies, generated with `pip-licenses`) plus the project `LICENSE`.
 - All GitHub Actions are pinned to full commit SHAs; [Dependabot](.github/dependabot.yml) opens weekly grouped update PRs for `github-actions`, `pip` and `npm` (`/web`).
 - Recommended branch protection for `main`: require the status checks `web`, `python` and `package` to pass before merging.
 
@@ -155,18 +175,31 @@ cd web; npm ci; npm run build; cd ..
 .venv\Scripts\pip install pyinstaller
 .venv\Scripts\pyinstaller ScribSalmon.spec --noconfirm   # -> dist\ScribSalmon\ScribSalmon.exe
 Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run from a downloaded zip
+# installer (needs Inno Setup 6; LICENSE and THIRD_PARTY_NOTICES.txt must be in dist\ScribSalmon)
+.\installer\build-installer.ps1 -Version (Get-Content VERSION -Raw).Trim()   # -> installer\Output\ScribSalmon-Setup-<version>.exe
 ```
 
 ## Troubleshooting
 
 - **"`claude` CLI not found"** - install Claude Code and log in, or switch Summary backend to API and add a key.
 - **`Failed to resolve Python.Runtime.Loader.Initialize`** - Windows blocked the DLLs of a downloaded zip. Use release 1.0.1+, or run `Get-ChildItem -Recurse <folder> | Unblock-File` (or right-click the zip -> Properties -> Unblock *before* extracting).
-- **Blank window** - install the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
+- **Blank window** - install the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). The installer warns if it is missing.
+- **SmartScreen: "Windows protected your PC"** - the installer and exe are unsigned. Click *More info -> Run anyway*. Optionally compare the file's SHA-256 with `SHA256SUMS.txt` from the release.
+- **Installer says ScribSalmon is still running** - close the app (check the system tray / Task Manager) and click *Retry*.
+- **Update banner never appears** - check that *Check for updates on launch* is on in Settings, use *Check now*, and make sure `api.github.com` is reachable (proxy or firewall). Zip/portable copies only get a link to the release page, not a self-update.
 - **No system audio captured** - make sure audio is playing on the *default* output device.
 - **Thai text is garbled** - choose the Thai preset, set Language = Thai, add Names & terms, then Refine + Check words.
 - **UI not built** (running from source) - `cd web && npm install && npm run build`.
 
 ## Changelog
+
+### 1.4.0
+Installer and built-in update check.
+
+- **Installer:** new per-user Windows installer (`ScribSalmon-Setup-<version>.exe`, Inno Setup, installs to `%LOCALAPPDATA%\Programs\ScribSalmon`, no admin rights needed) with Start menu / optional desktop shortcut and a normal uninstaller. Uninstall keeps your notes and settings. The portable zip is still published.
+- **Updates:** on launch (at most once a day, can be turned off in Settings) ScribSalmon checks GitHub Releases for a newer version and shows a banner. Nothing is downloaded or installed until you click; the installer is SHA-256 verified before it runs, and the app restarts after the update.
+- **Releases:** `SHA256SUMS.txt` now covers both the zip and the installer and uses LF line endings (1.3.0 used CRLF); the release workflow verifies it before publishing.
+- **Upgrading from 1.3.0:** 1.3.0 has no updater, so install 1.4.0 once by hand (see Download); you can then delete the old zip folder.
 
 ### 1.3.0
 Hardening and reliability release (includes everything that was planned as 1.1.0 and 1.2.0).
