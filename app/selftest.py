@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 THIRD_PARTY = ("faster_whisper", "ctranslate2", "av", "onnxruntime", "sounddevice", "soundcard")
-KNOWN_APP_MODULES = ("api", "audio", "core", "sessions", "settings", "summarize", "transcribe", "version")
+KNOWN_APP_MODULES = ("api", "audio", "core", "sessions", "settings", "summarize", "transcribe", "updater", "version")
 
 
 def _root() -> Path:
@@ -39,6 +39,11 @@ def _check_ui() -> None:
         raise FileNotFoundError(str(p))
 
 
+def _check_ssl() -> None:
+    import ssl
+    ssl.create_default_context()
+
+
 def _check_winforms() -> None:
     # exactly where 1.0.0 crashed: needs ScribSalmon.exe.config next to the exe
     import clr  # noqa: F401
@@ -60,6 +65,7 @@ def run(out_path=None) -> int:
     for name, mod in checks:
         attempt(name, lambda mod=mod: _import(mod))
     attempt("web/dist/index.html", _check_ui)
+    attempt("ssl", _check_ssl)
     attempt("clr+System+webview.winforms", _check_winforms)
 
     try:
