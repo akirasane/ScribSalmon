@@ -16,6 +16,7 @@ updates:
       interval: monthly
     ignore:
       - dependency-name: "PySide6"   # only used by tools/make_icons.py
+      - dependency-name: "numpy"     # capped <2.3 on purpose (audio / Whisper stack compatibility)
       - dependency-name: "*"         # majors are upgraded deliberately (the lock file is what ships)
         update-types: ["version-update:semver-major"]
     labels:
