@@ -23,11 +23,12 @@
 - **Notes list** - create, search, edit, rename, delete, export to Markdown. Each note is a plain folder on disk.
 - **Record / Stop** - captures **system audio (WASAPI loopback)** and **microphone** at once, mixed to 16 kHz mono. Works with Teams, Zoom, Meet, browser calls, anything you can hear.
 - **Live or after-stop transcription** - transcribe in ~6 s chunks while recording, or record only and transcribe after Stop.
-- **Import WAV** - add an existing 16-bit PCM `.wav` to a note.
+- **Import audio (WAV/MP3/M4A/FLAC/OGG...)** - add an existing audio file to a note.
 - **Refine** - re-transcribes the whole recording in one pass (more accurate than live chunks).
 - **Check words** - Claude flags garbled phrases (typical for Thai); you pick option 1-3, keep the original, or type your own.
-- **Summary** - numbered Overview / Key Points / Decisions / Action Items / Open Questions / Needs Review. The prompt is **Thai-aware and fully editable** (globally and per note).
-- **Two transcription engines** - local `faster-whisper` (offline, GPU used automatically if CUDA is available) or OpenAI Whisper API.
+- **Summary** - numbered Overview / Key Points / Decisions / Action Items / Open Questions / Needs Review. The prompt is **Thai-aware and fully editable**.
+- **Two transcription engines** - local `faster-whisper` (offline, GPU used automatically if available) or OpenAI Whisper API.
+- **GPU note** - GPU transcription needs the NVIDIA driver plus CUDA 12 / cuDNN 9 libraries on PATH; otherwise ScribSalmon falls back to CPU automatically (Settings -> Device).
 - **Two summary backends** - the local **Claude Code CLI** (uses your existing login, no API key) or the **Anthropic API**.
 - **Thai accuracy presets** - Thai fine-tuned Whisper (Thonburian), `large-v3`, `large-v3-turbo`, custom model id/folder, and a *Names & terms* hint list.
 - Salmon-coloured dark UI (React + Tailwind v4), custom logo and icons, dark title bar.
@@ -108,7 +109,7 @@ npm run dev                         # http://127.0.0.1:5173 - works in a normal 
 
 | What | Location |
 |---|---|
-| Notes | `Documents\ScribSalmon\<timestamp>\` |
+| Notes | `ScribSalmon\<timestamp>\` inside your Windows Documents folder (OneDrive-redirected locations are honored); set `SCRIBSALMON_DATA_DIR` to use any other folder |
 | Settings (API keys encrypted with Windows DPAPI) | `%APPDATA%\ScribSalmon\settings.json` |
 | Whisper models | Hugging Face cache (`~\.cache\huggingface`) |
 
