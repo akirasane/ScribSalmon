@@ -149,17 +149,22 @@ Build the package locally:
 cd web; npm ci; npm run build; cd ..
 .venv\Scripts\pip install pyinstaller
 .venv\Scripts\pyinstaller ScribSalmon.spec --noconfirm   # -> dist\ScribSalmon\ScribSalmon.exe
+Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run from a downloaded zip
 ```
 
 ## Troubleshooting
 
 - **"`claude` CLI not found"** - install Claude Code and log in, or switch Summary backend to API and add a key.
+- **`Failed to resolve Python.Runtime.Loader.Initialize`** - Windows blocked the DLLs of a downloaded zip. Use release 1.0.1+, or run `Get-ChildItem -Recurse <folder> | Unblock-File` (or right-click the zip -> Properties -> Unblock *before* extracting).
 - **Blank window** - install the [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 - **No system audio captured** - make sure audio is playing on the *default* output device.
 - **Thai text is garbled** - choose the Thai preset, set Language = Thai, add Names & terms, then Refine + Check words.
 - **UI not built** (running from source) - `cd web && npm install && npm run build`.
 
 ## Changelog
+
+### 1.0.1
+Fix: app failed to start when extracted from a downloaded zip (`Failed to resolve Python.Runtime.Loader.Initialize`).
 
 ### 1.0.0
 First release: notes CRUD, record/stop (system + mic), live or after-stop transcription, Refine, Check words, Thai-aware editable summary prompt, Claude Code CLI backend, Thai fine-tuned Whisper preset, salmon theme, logo and icons.

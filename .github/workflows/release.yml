@@ -64,6 +64,7 @@ jobs:
 
       - name: Zip
         run: |
+          Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\
           Compress-Archive -Path dist\ScribSalmon -DestinationPath "ScribSalmon-v${{ needs.check.outputs.version }}-windows-x64.zip"
           Get-ChildItem *.zip
 
