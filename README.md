@@ -28,7 +28,7 @@
 - **Check words** - Claude flags garbled phrases (typical for Thai); you pick option 1-3, keep the original, or type your own.
 - **Summary** - numbered Overview / Key Points / Decisions / Action Items / Open Questions / Needs Review. The prompt is **Thai-aware and fully editable**.
 - **Two transcription engines** - local `faster-whisper` (offline, GPU used automatically if available) or OpenAI Whisper API.
-- **GPU note** - GPU transcription needs the NVIDIA driver plus CUDA 12 / cuDNN 9 libraries on PATH; otherwise ScribSalmon falls back to CPU automatically (Settings -> Device).
+- **GPU note** - GPU transcription needs an NVIDIA driver (528.33+) and the cuBLAS 12 libraries, which Settings -> GPU can download in one click (see [GPU acceleration](#gpu-acceleration)); otherwise ScribSalmon falls back to CPU automatically (Settings -> Device). cuDNN is not needed.
 - **Two summary backends** - the local **Claude Code CLI** (uses your existing login, no API key) or the **Anthropic API**.
 - **Thai accuracy presets** - Thai fine-tuned Whisper (Thonburian), `large-v3`, `large-v3-turbo`, custom model id/folder, and a *Names & terms* hint list.
 - Salmon-coloured dark UI (React + Tailwind v4), custom logo and icons, dark title bar.
@@ -121,12 +121,30 @@ npm run dev                         # http://127.0.0.1:5173 - works in a normal 
 |---|---|
 | Notes | `ScribSalmon\<timestamp>\` inside your Windows Documents folder (OneDrive-redirected locations are honored); set `SCRIBSALMON_DATA_DIR` to use any other folder |
 | Settings (API keys encrypted with Windows DPAPI) | `%APPDATA%\ScribSalmon\settings.json` |
+| Log files (rotating, secrets redacted) | `%APPDATA%\ScribSalmon\logs\scribsalmon.log` (plus `crash.log` for native crashes) |
+| Downloaded NVIDIA GPU libraries (optional) | `%LOCALAPPDATA%\ScribSalmon\gpu-libs` |
 | Whisper models | Hugging Face cache (`~\.cache\huggingface`) |
 
 Each note folder contains `meta.json`, `rec_001.wav ...`, `transcript.txt`, `summary.md`.
 Old `VoiceRecog` folders are migrated automatically on first launch.
 
 The installed app lives in `%LOCALAPPDATA%\Programs\ScribSalmon`; nothing is written there at runtime, so uninstalling or updating never touches your notes or settings.
+
+## GPU acceleration
+
+The only requirements are an NVIDIA GPU with a driver of version 528.33 or newer and the **cuBLAS 12** libraries. cuDNN is **not** used and you do not need to install the CUDA toolkit.
+
+- **One click:** *Settings -> GPU -> Download GPU libraries* downloads 553 MB (about 735 MB on disk) from PyPI (the `nvidia-cublas-cu12` package, published by NVIDIA). The download is pinned to an exact size and SHA-256, and is stored in `%LOCALAPPDATA%\ScribSalmon\gpu-libs`. If you already have a CUDA 12 toolkit on PATH, nothing needs downloading.
+- **Licence:** these libraries are covered by the [NVIDIA CUDA EULA](https://docs.nvidia.com/cuda/eula/index.html), not by this project's MIT licence. ScribSalmon does not redistribute them; they are fetched from NVIDIA's package at your click, and the licence text is saved next to them. Uninstalling ScribSalmon offers to remove them.
+- **Privacy:** the app contacts the network for this only when you click the download button.
+
+How **Device** behaves:
+
+| Device | Behaviour |
+|---|---|
+| Auto | Uses the NVIDIA GPU (float16) when CTranslate2 sees a CUDA device and cuBLAS 12 is found (in our folder or from a CUDA 12 toolkit on PATH). Any CUDA error while loading, warming up or transcribing falls back to the CPU (int8) and shows a toast with the reason. |
+| CPU | Never touches the GPU. |
+| CUDA | Shows an error instead of falling back to the CPU. |
 
 ## Updates
 
@@ -187,11 +205,21 @@ Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run fro
 - **SmartScreen: "Windows protected your PC"** - the installer and exe are unsigned. Click *More info -> Run anyway*. Optionally compare the file's SHA-256 with `SHA256SUMS.txt` from the release.
 - **Installer says ScribSalmon is still running** - close the app (check the system tray / Task Manager) and click *Retry*.
 - **Update banner never appears** - check that *Check for updates on launch* is on in Settings, use *Check now*, and make sure `api.github.com` is reachable (proxy or firewall). Zip/portable copies only get a link to the release page, not a self-update.
+- **"GPU unavailable, using CPU"** - open *Settings -> GPU*. It shows what is missing (NVIDIA driver older than 528.33, or the cuBLAS 12 libraries) and offers **Download GPU libraries**. A CUDA 13 toolkit alone does not help: CTranslate2 needs the CUDA **12** cuBLAS.
+- **Still stuck / reporting a bug** - click **Copy diagnostics** in *Settings -> GPU* and paste the result into the issue (secrets and your user name are redacted), or attach `%APPDATA%\ScribSalmon\logs\scribsalmon.log`.
 - **No system audio captured** - make sure audio is playing on the *default* output device.
 - **Thai text is garbled** - choose the Thai preset, set Language = Thai, add Names & terms, then Refine + Check words.
 - **UI not built** (running from source) - `cd web && npm install && npm run build`.
 
 ## Changelog
+
+### 1.4.1
+Log file and one-click GPU setup.
+
+- **GPU:** Settings -> GPU shows whether an NVIDIA GPU, a recent enough driver and the cuBLAS 12 libraries were found, and why the CPU is being used if not. One click on **Download GPU libraries** fetches the NVIDIA cuBLAS 12 libraries (553 MB) so you no longer need to install the CUDA toolkit. cuDNN is not required.
+- **Fallback:** with Device = Auto, ScribSalmon no longer loads a model into GPU memory just to discard it when the libraries are missing; it goes straight to the CPU and tells you the reason, with a shortcut to Settings -> GPU.
+- **Logging:** a rotating log file (`%APPDATA%\ScribSalmon\logs\scribsalmon.log`) records startup, GPU detection and errors (never transcripts, notes or API keys). **Copy diagnostics** in Settings puts a redacted report on the clipboard for bug reports; **Open log folder** opens the logs.
+- **Uninstall:** the uninstaller offers to delete the downloaded GPU libraries.
 
 ### 1.4.0
 Installer and built-in update check.
