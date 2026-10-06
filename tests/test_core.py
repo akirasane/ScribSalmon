@@ -414,3 +414,34 @@ def test_shutdown_cancels_gpu_download(ctl, monkeypatch):
     monkeypatch.setattr(c.gpulibs, "cancel", lambda: called.append(1) or True)
     c.shutdown()
     assert called
+
+
+def test_startup_cleanup_calls_both_module_functions(data_dirs, monkeypatch):
+    """Regression: 1.4.0 called Updater.cleanup_stale (does not exist) so cleanup never ran, and the
+    gpulibs cleanup sharing the same try block was skipped as well."""
+    import threading
+
+    from app import core, gpulibs
+    from app import updater as updater_mod
+
+    calls = []
+
+    def rec(name, fail=False):
+        def fn(*a, **k):
+            if threading.current_thread() is threading.main_thread():  # ignore the Controller's own startup thread
+                calls.append(name)
+            if fail:
+                raise RuntimeError("boom")
+        return fn
+
+    monkeypatch.setattr(updater_mod, "cleanup_stale", rec("updater"))
+    monkeypatch.setattr(gpulibs, "cleanup_stale", rec("gpulibs"))
+    c = core.Controller(lambda *a: None)
+    c._cleanup_updates()
+    assert calls == ["updater", "gpulibs"]
+
+    # one failing cleanup must not skip the other
+    calls.clear()
+    monkeypatch.setattr(updater_mod, "cleanup_stale", rec("updater", fail=True))
+    c._cleanup_updates()
+    assert calls == ["updater", "gpulibs"]

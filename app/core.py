@@ -21,6 +21,7 @@ from .audio import Recorder
 from .sessions import Session
 from .errors import Cancelled
 from .settings import INTERNAL, SECRETS, Settings, coerce_patch
+from . import updater as _updater_mod
 from .updater import Updater, install_mode
 from .summarize import DEFAULT_PROMPT, review, summarize
 from .transcribe import SAMPLE_RATE, load_wav, make_engine
@@ -71,11 +72,12 @@ class Controller:
         return self.recorder is None and not self._busy_now()
 
     def _cleanup_updates(self):
-        try:
-            self.updater.cleanup_stale()
-            gpulibs.cleanup_stale()
-        except Exception:  # noqa: BLE001 - housekeeping must never matter
-            log.info("update cleanup failed", exc_info=True)
+        # module-level functions (not Updater methods); each guarded on its own so one failure can't skip the other
+        for fn in (_updater_mod.cleanup_stale, gpulibs.cleanup_stale):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - housekeeping must never matter
+                log.info("cleanup failed: %s", getattr(fn, "__module__", fn), exc_info=True)
 
     def _save_update_fields(self, fields: dict) -> None:
         """Persist updater-owned settings (last check / skipped version); nothing else is touched."""
