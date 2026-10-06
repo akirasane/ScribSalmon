@@ -90,3 +90,63 @@ def known_folder(folder_id_guid: str) -> Optional[Path]:
 def known_documents() -> Path:
     """The user's Documents folder (may be redirected to OneDrive); falls back to ~/Documents."""
     return known_folder(FOLDERID_DOCUMENTS) or Path.home() / "Documents"
+
+
+def set_clipboard_text(text: str) -> bool:
+    """Put `text` on the Windows clipboard (CF_UNICODETEXT). False off-Windows or on any failure."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        import time
+        from ctypes import wintypes
+
+        GMEM_MOVEABLE = 0x0002
+        CF_UNICODETEXT = 13
+        k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
+        u32.OpenClipboard.argtypes = [wintypes.HWND]
+        u32.OpenClipboard.restype = wintypes.BOOL
+        u32.EmptyClipboard.restype = wintypes.BOOL
+        u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        u32.SetClipboardData.restype = wintypes.HANDLE
+        u32.CloseClipboard.restype = wintypes.BOOL
+        k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        k32.GlobalAlloc.restype = wintypes.HGLOBAL
+        k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        k32.GlobalUnlock.restype = wintypes.BOOL
+        k32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        k32.GlobalFree.restype = wintypes.HGLOBAL
+
+        data = (str(text) + "\0").encode("utf-16-le")
+        opened = False
+        for _ in range(5):
+            if u32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.05)
+        if not opened:
+            return False
+        try:
+            if not u32.EmptyClipboard():
+                return False
+            h = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not h:
+                return False
+            ptr = k32.GlobalLock(h)
+            if not ptr:
+                k32.GlobalFree(h)
+                return False
+            try:
+                ctypes.memmove(ptr, data, len(data))
+            finally:
+                k32.GlobalUnlock(h)
+            if not u32.SetClipboardData(CF_UNICODETEXT, h):
+                k32.GlobalFree(h)  # ownership only transfers on success
+                return False
+            return True
+        finally:
+            u32.CloseClipboard()
+    except Exception:
+        return False

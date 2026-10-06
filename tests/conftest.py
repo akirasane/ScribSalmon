@@ -12,6 +12,7 @@ from pathlib import Path
 _SESSION_HOME = Path(tempfile.mkdtemp(prefix="scribsalmon-test-"))
 os.environ["APPDATA"] = str(_SESSION_HOME / "AppData")
 os.environ["USERPROFILE"] = str(_SESSION_HOME)
+os.environ["LOCALAPPDATA"] = str(_SESSION_HOME / "AppData" / "Local")
 os.environ["HOME"] = str(_SESSION_HOME)
 for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
     os.environ.pop(_k, None)
