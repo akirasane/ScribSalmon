@@ -2,6 +2,6 @@ faster-whisper>=1.2.1
 soundcard>=0.4.6
 numpy>=1.26,<2.3
 anthropic>=0.40
-openai>=1.40
+openai>=3.24.0
 sounddevice>=0.5.6
 pywebview>=6.2.1
