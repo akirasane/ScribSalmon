@@ -53,6 +53,9 @@ $appDataExisted = Test-Path $appData
 $docsExisted = Test-Path $docs
 $sentinel1 = Join-Path $appData 'ci-sentinel.txt'
 $sentinel2 = Join-Path $docs 'ci-sentinel\meta.json'
+$localApp = Join-Path $env:LOCALAPPDATA 'ScribSalmon'
+$localAppExisted = Test-Path $localApp
+$sentinel3 = Join-Path $localApp 'gpu-libs\x\manifest.json'
 
 try {
     # (1) mark the setup as downloaded from the Internet, like a browser would
@@ -87,6 +90,8 @@ try {
     Set-Content $sentinel1 'keep'
     New-Item -ItemType Directory -Force (Split-Path $sentinel2) | Out-Null
     Set-Content $sentinel2 '{}'
+    New-Item -ItemType Directory -Force (Split-Path $sentinel3) | Out-Null
+    Set-Content $sentinel3 '{}'
 
     # (9) uninstall
     $unins = Join-Path $installDir 'unins000.exe'
@@ -105,6 +110,8 @@ try {
     if (-not (Test-Path $sentinel2)) { throw 'notes sentinel deleted by uninstall' }
     if (Test-Path $uninstKey) { throw 'uninstall registry key still present' }
     Write-Host 'OK: user data kept, uninstall key removed'
+    if (Test-Path $sentinel3) { throw 'downloaded GPU libraries (gpu-libs) not removed by silent uninstall' }
+    Write-Host 'OK: downloaded GPU libraries removed'
     Write-Host 'INSTALLER TEST PASSED'
 }
 finally {
@@ -118,6 +125,8 @@ finally {
     Remove-Item $sentinel1 -Force -ErrorAction SilentlyContinue
     Remove-Item (Split-Path $sentinel2) -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $appDataExisted) { Remove-Item $appData -Recurse -Force -ErrorAction SilentlyContinue }
+    Remove-Item (Join-Path $localApp 'gpu-libs') -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not $localAppExisted) { Remove-Item $localApp -Recurse -Force -ErrorAction SilentlyContinue }
     if (-not $docsExisted) { Remove-Item $docs -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item $uninstKey -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $logDir -Recurse -Force -ErrorAction SilentlyContinue
