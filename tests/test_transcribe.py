@@ -148,3 +148,67 @@ def test_local_transcribe_should_stop_raises_cancelled():
         _local().transcribe(audio, "en", should_stop=stop)
     with pytest.raises(errors.Cancelled):
         _local().transcribe(audio, "en", should_stop=lambda: True)
+
+
+# ---- GPU / CUDA selection (fake WhisperModel, no GPU)
+
+def _fake_whisper(monkeypatch, calls, fail_cuda=False):
+    import sys
+    import types
+
+    class FakeWM:
+        def __init__(self, name, device="cpu", compute_type="int8"):
+            calls.append((device, compute_type))
+            if device == "cuda" and fail_cuda:
+                raise RuntimeError("CUDA failed with error out of memory")
+
+        def transcribe(self, *a, **k):
+            return iter([]), None
+    mod = types.ModuleType("faster_whisper")
+    mod.WhisperModel = FakeWM
+    monkeypatch.setitem(sys.modules, "faster_whisper", mod)
+
+
+def test_auto_with_missing_dlls_skips_cuda(monkeypatch):
+    calls = []
+    _fake_whisper(monkeypatch, calls)
+    monkeypatch.setattr(transcribe, "_cuda_count", lambda: 1)
+    monkeypatch.setattr(transcribe.gpu, "activate", lambda preload=False: None)
+    monkeypatch.setattr(transcribe.gpu, "missing_dlls", lambda: ["cublas64_12.dll"])
+    e = transcribe.LocalWhisper("tiny", "auto")
+    assert calls == [("cpu", "int8")]  # no model loaded into VRAM
+    assert e.device == "cpu" and "cuBLAS 12" in e.fallback_reason
+
+
+def test_cuda_with_missing_dlls_raises_clear_error(monkeypatch):
+    calls = []
+    _fake_whisper(monkeypatch, calls)
+    monkeypatch.setattr(transcribe, "_cuda_count", lambda: 1)
+    monkeypatch.setattr(transcribe.gpu, "activate", lambda preload=False: None)
+    monkeypatch.setattr(transcribe.gpu, "missing_dlls", lambda: ["cublas64_12.dll"])
+    with pytest.raises(RuntimeError, match="cuBLAS 12"):
+        transcribe.LocalWhisper("tiny", "cuda")
+    assert calls == []
+
+
+def test_auto_cuda_ready_and_runtime_failure_falls_back(monkeypatch):
+    calls = []
+    _fake_whisper(monkeypatch, calls, fail_cuda=True)
+    monkeypatch.setattr(transcribe, "_cuda_count", lambda: 1)
+    monkeypatch.setattr(transcribe.gpu, "activate", lambda preload=False: None)
+    monkeypatch.setattr(transcribe.gpu, "missing_dlls", lambda: [])
+    e = transcribe.LocalWhisper("tiny", "auto")
+    assert calls[0][0] == "cuda" and calls[-1] == ("cpu", "int8")
+    assert "smaller" in e.fallback_reason
+    with pytest.raises(RuntimeError, match="not usable"):
+        transcribe.LocalWhisper("tiny", "cuda")
+
+
+def test_activate_called_before_cuda_attempt(monkeypatch):
+    order = []
+    _fake_whisper(monkeypatch, order)
+    monkeypatch.setattr(transcribe, "_cuda_count", lambda: 1)
+    monkeypatch.setattr(transcribe.gpu, "activate", lambda preload=False: order.append(("activate", preload)))
+    monkeypatch.setattr(transcribe.gpu, "missing_dlls", lambda: [])
+    transcribe.LocalWhisper("tiny", "auto")
+    assert order[0] == ("activate", True) and order[1][0] == "cuda"
