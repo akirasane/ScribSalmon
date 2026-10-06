@@ -33,6 +33,6 @@ REQUIRED_FREE_BYTES = SIZE + INSTALLED_BYTES + 100 * 1024 * 1024  # wheel + extr
 
 
 def libs_root() -> Path:
-    """%LOCALAPPDATA%\ScribSalmon\gpu-libs (Local, not Roaming: 771 MB must not sync)."""
+    """%LOCALAPPDATA%/ScribSalmon/gpu-libs (Local, not Roaming: 771 MB must not sync)."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "ScribSalmon" / "gpu-libs"
