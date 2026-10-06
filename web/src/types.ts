@@ -83,6 +83,46 @@ export interface Toast {
   id: number
   kind: 'error' | 'info'
   text: string
+  /** optional button on the toast (e.g. "Open Settings -> GPU") */
+  action?: { label: string; onClick: () => void }
+}
+
+export type GpuState = 'no_gpu' | 'driver_old' | 'libs_missing' | 'ready' | 'active' | 'failed'
+
+export interface GpuStatus {
+  state: GpuState
+  gpu_present: boolean
+  gpus: { name: string; driver?: string; vram_mb?: number; compute_cap?: string }[]
+  gpu_name: string
+  driver: string
+  driver_cuda: string
+  vram_mb: number | null
+  compute_cap: string
+  cuda_device_count: number
+  required_dlls: string[]
+  dlls: Record<string, string | null>
+  missing_dlls: string[]
+  libs_dir: string | null
+  libs_installed_version: string | null
+  cuda_ok: boolean
+  message: string
+  hint: string
+}
+
+export type GpuPhase = 'download' | 'verify' | 'extract'
+
+/** Payload of the `gpu_progress` event */
+export interface GpuProgress {
+  pct: number
+  received: number
+  total: number
+  phase: GpuPhase
+}
+
+/** Payload of the `gpu_fallback` event */
+export interface GpuFallback {
+  reason: string
+  detail?: string
 }
 
 export interface ReviewItem {

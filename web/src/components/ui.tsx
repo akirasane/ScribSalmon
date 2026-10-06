@@ -145,6 +145,17 @@ export function Toasts({ items, dismiss }: { items: Toast[]; dismiss: (id: numbe
           >
             <span className={`mt-1 size-2 shrink-0 rounded-full ${t.kind === 'error' ? 'bg-danger' : 'bg-accent'}`} />
             <span className="selectable flex-1 leading-snug break-words">{t.text}</span>
+            {t.action && (
+              <button
+                className="shrink-0 cursor-pointer rounded-full border border-line px-2.5 py-0.5 text-[12px] font-medium text-accent hover:border-accent/60 hover:bg-card-hi"
+                onClick={() => {
+                  t.action!.onClick()
+                  dismiss(t.id)
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
             <button className="cursor-pointer text-mute hover:text-ink" onClick={() => dismiss(t.id)}>
               <X className="size-4" />
             </button>

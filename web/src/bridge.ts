@@ -1,4 +1,4 @@
-import type { TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch, UpdateCheck } from './types'
+import type { TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch, UpdateCheck, GpuStatus } from './types'
 
 type Res<T> = { ok: true; data: T } | { ok: false; error: string }
 type Listener = (payload: any) => void
@@ -80,5 +80,11 @@ export const bridge = {
   cancelUpdate: () => call<boolean>('cancel_update'),
   skipUpdate: (version: string) => call<boolean>('skip_update', version),
   installUpdate: () => call<boolean>('install_update'),
+  gpuStatus: () => call<GpuStatus>('gpu_status'),
+  downloadGpuLibs: () => call<boolean>('download_gpu_libs'),
+  cancelGpuDownload: () => call<boolean>('cancel_gpu_download'),
+  openLogFolder: () => call<boolean>('open_log_folder'),
+  copyDiagnostics: () => call<boolean>('copy_diagnostics'),
+  restartApp: () => call<boolean>('restart_app'),
   openExternal: (url: string) => call<boolean>('open_external', url),
 }
