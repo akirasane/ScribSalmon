@@ -248,16 +248,21 @@ def install(on_progress: Optional[Callable] = None, cancel: Optional[threading.E
         _rm_tree(staging)
 
 
-def cleanup_stale() -> None:
-    """Remove leftover .staging-* folders (crash / power loss mid-install). Never while an install is running."""
+STALE_AFTER = 6 * 3600  # seconds: a staging folder younger than this may belong to a running install (this or another window)
+
+
+def cleanup_stale(max_age: float = STALE_AFTER) -> None:
+    """Remove leftover .staging-* folders (crash / power loss mid-install). Never while an install is running
+    here, and never a recent folder (another ScribSalmon window may be downloading into it)."""
     if _active.is_set():
         return
     try:
         root = gpuconst.libs_root()
         if not root.is_dir():
             return
+        now = time.time()
         for d in root.glob(STAGING_PREFIX + "*"):
-            if d.is_dir() and not d.is_symlink():
+            if d.is_dir() and not d.is_symlink() and now - d.stat().st_mtime >= max_age:
                 log.info("removing stale GPU libraries staging folder %s", d.name)
                 _rm_tree(d)
     except Exception:

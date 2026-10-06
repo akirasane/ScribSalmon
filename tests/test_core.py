@@ -302,3 +302,146 @@ def test_start_recording_refused_when_quitting(ctl):
     c.updater.quitting = True
     with pytest.raises(ValueError, match="update"):
         c.start_recording("whatever", {})
+
+
+# ---------------------------------------------------------------- GPU bridge
+class FbEngine(FakeEngine):
+    def __init__(self, reason, device="cpu"):
+        super().__init__()
+        self.fallback_reason, self.device = reason, device
+
+
+def test_gpu_fallback_emitted_once_per_reason(ctl, monkeypatch):
+    c, rec = ctl
+    c.engine = None
+    reasons = ["Library cublas64_12.dll is not found or cannot be loaded", "other failure"]
+    seq = iter(reasons + reasons)
+    monkeypatch.setattr(core, "make_engine", lambda s: FbEngine(next(seq)))
+    for _ in range(4):
+        c._get_engine()
+        c._reset_engine()
+    ev = rec.of("gpu_fallback")
+    assert len(ev) == 2
+    assert ev[0]["detail"] == reasons[0] and "cuBLAS" in ev[0]["reason"]
+    assert ev[1]["reason"] == "other failure"
+    assert not [e for e in rec.of("error") if "GPU unavailable" in str(e)]
+
+
+def test_engine_log_has_no_secrets(ctl, monkeypatch, caplog):
+    c, _ = ctl
+    c.engine = None
+    c.s.openai_key = "sk-SECRETSECRETSECRET1234"
+    c.s.vocabulary = "TOPSECRETWORD"
+    monkeypatch.setattr(core, "make_engine", lambda s: FbEngine(None))
+    with caplog.at_level("INFO", logger="app.core"):
+        c._get_engine()
+    assert "engine ready" in caplog.text
+    assert "SECRETSECRET" not in caplog.text and "TOPSECRETWORD" not in caplog.text
+
+
+def test_gpu_libs_installed_resets_engine_and_returns_status(ctl, monkeypatch):
+    c, rec = ctl
+    calls = []
+    monkeypatch.setattr(core.gpu, "activate", lambda preload=False: calls.append(("activate", preload)))
+    monkeypatch.setattr(core.gpu, "invalidate_cache", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(core.gpu, "status", lambda *a, **k: {"state": "ready", "message": "ok"})
+    gen = c._engine_gen
+    st = c._on_gpu_libs_installed()
+    assert c.engine is None and c._engine_gen == gen + 1
+    assert calls == [("activate", True), "invalidate"]
+    assert st["state"] == "ready" and st["download_bytes"] > 0 and st["disk_bytes"] > 0
+    assert st["eula_url"].startswith("https://") and "gpu-libs" in st["libs_folder"]
+
+
+def test_installer_gpu_ready_carries_fresh_status(ctl, monkeypatch):
+    c, rec = ctl
+    monkeypatch.setattr(core.gpu, "activate", lambda preload=False: None)
+    monkeypatch.setattr(core.gpu, "status", lambda *a, **k: {"state": "ready"})
+    monkeypatch.setattr(core.gpulibs, "install", lambda prog, cancel: None)
+    assert c.gpulibs.start() is True
+    assert wait_for(lambda: rec.of("gpu_ready"))
+    assert rec.last("gpu_ready")["status"]["state"] == "ready"
+
+
+def test_gpu_status_merges_engine_state(ctl, monkeypatch):
+    c, _ = ctl
+    monkeypatch.setattr(core.gpu, "status", lambda *a, **k: {"state": "ready", "message": "m", "hint": ""})
+    c.engine = FbEngine(None, device="cuda")
+    assert c.gpu_status()["state"] == "active"
+    c.engine = FbEngine("cublas64_12.dll is not found", device="cpu")
+    assert c.gpu_status()["state"] == "failed"
+
+
+def test_restart_app_only_when_idle(ctl):
+    c, _ = ctl
+    c.recorder = object()
+    with pytest.raises(ValueError):
+        c.restart_app()
+    c.recorder = None
+    c._pending["x"] = 1
+    with pytest.raises(ValueError):
+        c.restart_app()
+    assert c.restart_requested is False
+    c._pending.clear()
+    assert c.restart_app() is True and c.restart_requested is True
+
+
+def test_diagnostics_has_sections_and_no_secrets(ctl, monkeypatch):
+    c, _ = ctl
+    monkeypatch.setattr(core.gpu, "status", lambda *a, **k: {"state": "no_gpu"})
+    c.s.openai_key = "sk-SECRETSECRETSECRET1234"
+    c.s.anthropic_key = "sk-ant-api03-" + "Zz9y8X7w" * 4
+    c.s.vocabulary = "TOPSECRETWORD"
+    n = c.create_note()
+    sessions.load(sessions.SESSIONS_DIR / n["id"]).write("transcript.txt", "PRIVATE TRANSCRIPT TEXT")
+    text = c.diagnostics()
+    for sec in ("version", "install mode", "os", "settings", "gpu", "engine"):
+        assert f"== {sec} ==" in text
+    for bad in ("SECRETSECRET", "Zz9y8X7w", "TOPSECRETWORD", "PRIVATE TRANSCRIPT"):
+        assert bad not in text
+
+
+def test_error_wrapper_logs_and_emits(ctl, caplog):
+    c, rec = ctl
+    with caplog.at_level("WARNING", logger="app.core"):
+        c._err("boom")
+    assert rec.last("error") == "boom" and "boom" in caplog.text
+
+
+def test_shutdown_cancels_gpu_download(ctl, monkeypatch):
+    c, _ = ctl
+    called = []
+    monkeypatch.setattr(c.gpulibs, "cancel", lambda: called.append(1) or True)
+    c.shutdown()
+    assert called
+
+
+def test_startup_cleanup_calls_both_module_functions(data_dirs, monkeypatch):
+    """Regression: 1.4.0 called Updater.cleanup_stale (does not exist) so cleanup never ran, and the
+    gpulibs cleanup sharing the same try block was skipped as well."""
+    import threading
+
+    from app import core, gpulibs
+    from app import updater as updater_mod
+
+    calls = []
+
+    def rec(name, fail=False):
+        def fn(*a, **k):
+            if threading.current_thread() is threading.main_thread():  # ignore the Controller's own startup thread
+                calls.append(name)
+            if fail:
+                raise RuntimeError("boom")
+        return fn
+
+    monkeypatch.setattr(updater_mod, "cleanup_stale", rec("updater"))
+    monkeypatch.setattr(gpulibs, "cleanup_stale", rec("gpulibs"))
+    c = core.Controller(lambda *a: None)
+    c._cleanup_updates()
+    assert calls == ["updater", "gpulibs"]
+
+    # one failing cleanup must not skip the other
+    calls.clear()
+    monkeypatch.setattr(updater_mod, "cleanup_stale", rec("updater", fail=True))
+    c._cleanup_updates()
+    assert calls == ["updater", "gpulibs"]

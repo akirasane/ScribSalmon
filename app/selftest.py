@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 THIRD_PARTY = ("faster_whisper", "ctranslate2", "av", "onnxruntime", "sounddevice", "soundcard")
-KNOWN_APP_MODULES = ("api", "audio", "core", "sessions", "settings", "summarize", "transcribe", "updater", "version")
+KNOWN_APP_MODULES = ("api", "audio", "core", "gpu", "gpuconst", "gpulibs", "logsetup", "sessions", "settings", "summarize", "transcribe", "updater", "version")
 
 
 def _root() -> Path:
@@ -51,6 +51,33 @@ def _check_winforms() -> None:
     import webview.platforms.winforms  # noqa: F401
 
 
+def _check_gpu_status() -> None:
+    from app import gpu
+    st = gpu.status()
+    if st.get("state") not in {"no_gpu", "driver_old", "libs_missing", "ready", "active", "failed"}:
+        raise ValueError(f"unexpected gpu state {st.get('state')!r}")
+
+
+def _check_gpuconst() -> None:
+    import re
+    from urllib.parse import urlparse
+    from app import gpuconst
+    if not re.fullmatch(r"[0-9a-f]{64}", gpuconst.SHA256):
+        raise ValueError("SHA256 pin malformed")
+    u = urlparse(gpuconst.URL)
+    if u.scheme != "https" or u.hostname not in gpuconst.ALLOWED_HOSTS:
+        raise ValueError("download URL is not https on an allowed host")
+    if gpuconst.SIZE <= 0:
+        raise ValueError("SIZE must be positive")
+
+
+def _check_redact() -> None:
+    from app import logsetup
+    key = "sk-ant-api03-" + "A1b2C3d4" * 4
+    if key in logsetup.redact(f"key={key}"):
+        raise ValueError("redact left a key visible")
+
+
 def run(out_path=None) -> int:
     checks = [(m, m) for m in _app_modules() + list(THIRD_PARTY)]
     failures = []
@@ -66,6 +93,9 @@ def run(out_path=None) -> int:
         attempt(name, lambda mod=mod: _import(mod))
     attempt("web/dist/index.html", _check_ui)
     attempt("ssl", _check_ssl)
+    attempt("gpu.status", _check_gpu_status)
+    attempt("gpuconst pins", _check_gpuconst)
+    attempt("logsetup.redact", _check_redact)
     attempt("clr+System+webview.winforms", _check_winforms)
 
     try:

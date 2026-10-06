@@ -25,7 +25,7 @@ for pkg in REQUIRED:
     hiddenimports += h
 
 # app modules that are only reached dynamically (selftest imports them by name) must still be bundled
-hiddenimports += ["app.updater"]
+hiddenimports += ["app.updater", "app.gpu", "app.gpulibs", "app.logsetup", "app.gpuconst"]
 
 
 def _write_version_info() -> str:

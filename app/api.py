@@ -4,16 +4,22 @@ Each call returns {"ok": true, "data": ...} or {"ok": false, "error": "..."} so 
 has to deal with Python tracebacks.
 """
 import json
+import logging
+import os
 import re
 import threading
-import traceback
 import webbrowser
 from typing import Optional
 from urllib.parse import urlparse
 
 import webview
 
+from . import logsetup, settings, winutil
 from .core import Controller
+from .gpulibs import GpuLibsError
+from .updater import UpdateError
+
+log = logging.getLogger(__name__)
 
 
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -35,8 +41,11 @@ def _safe(fn):
     def wrapper(self, *a, **kw):
         try:
             return {"ok": True, "data": fn(self, *a, **kw)}
+        except (ValueError, UpdateError, GpuLibsError) as e:  # expected, user-facing
+            log.info("api.%s refused: %s", fn.__name__, e)  # never log call arguments
+            return {"ok": False, "error": str(e)}
         except Exception as e:  # surfaced to the UI as a toast
-            traceback.print_exc()
+            log.exception("api.%s failed", fn.__name__)
             return {"ok": False, "error": str(e)}
     wrapper.__name__ = fn.__name__
     return wrapper
@@ -46,6 +55,7 @@ class Api:
     def __init__(self):
         self._window: Optional[webview.Window] = None
         self._closing = False
+        self._restart_requested = False  # read by main.py after webview.start() returns
         self._c = Controller(self._emit)
 
     def _bind(self, window: webview.Window):
@@ -166,6 +176,43 @@ class Api:
         ok = self._c.updater.install()
         if ok and self._window:
             threading.Timer(0.3, self._window.destroy).start()  # let the UI flush, then the close flow runs
+        return ok
+
+    # ---- GPU / diagnostics
+    @_safe
+    def gpu_status(self):
+        return self._c.gpu_status()
+
+    @_safe
+    def download_gpu_libs(self):
+        return self._c.gpulibs.start()
+
+    @_safe
+    def cancel_gpu_download(self):
+        return self._c.gpulibs.cancel()
+
+    @_safe
+    def open_log_folder(self):
+        d = logsetup.LOG_DIR
+        app_dir = settings.APP_DIR.resolve()
+        d.mkdir(parents=True, exist_ok=True)
+        real = d.resolve()
+        if app_dir not in real.parents or not real.is_dir():
+            raise ValueError("The log folder is not available.")
+        os.startfile(str(d))  # type: ignore[attr-defined]  # Windows only
+        return True
+
+    @_safe
+    def copy_diagnostics(self):
+        text = self._c.diagnostics()
+        return {"copied": bool(winutil.set_clipboard_text(text)), "chars": len(text)}
+
+    @_safe
+    def restart_app(self):
+        ok = self._c.restart_app()
+        self._restart_requested = True
+        if self._window:
+            threading.Timer(0.3, self._window.destroy).start()  # UI flushes, close flow runs, main relaunches
         return ok
 
     @_safe

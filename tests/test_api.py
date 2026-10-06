@@ -95,3 +95,114 @@ def test_update_methods_validate_and_wrap(api, monkeypatch):
     assert api.check_for_updates(True)["data"] == {"force": True}
     assert api.check_for_updates("yes")["data"] == {"force": False}
     assert api.skip_update(5)["ok"] is False
+
+
+# ---------------------------------------------------------------- GPU / diagnostics bridge
+def test_gpu_methods_wrap_controller(api, monkeypatch):
+    monkeypatch.setattr(api._c, "gpu_status", lambda: {"state": "no_gpu"})
+    monkeypatch.setattr(api._c.gpulibs, "start", lambda: True)
+    monkeypatch.setattr(api._c.gpulibs, "cancel", lambda: False)
+    assert api.gpu_status() == {"ok": True, "data": {"state": "no_gpu"}}
+    assert api.download_gpu_libs() == {"ok": True, "data": True}
+    assert api.cancel_gpu_download() == {"ok": True, "data": False}
+
+
+def test_safe_logs_expected_at_info_and_unexpected_with_traceback(api, monkeypatch, caplog):
+    def bad():
+        raise ValueError("nope")
+
+    def worse():
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(api._c, "gpu_status", bad)
+    with caplog.at_level("INFO", logger="app.api"):
+        assert api.gpu_status() == {"ok": False, "error": "nope"}
+    assert [r.levelname for r in caplog.records] == ["INFO"]
+    caplog.clear()
+    monkeypatch.setattr(api._c, "gpu_status", worse)
+    with caplog.at_level("INFO", logger="app.api"):
+        assert api.gpu_status()["ok"] is False
+    assert caplog.records[-1].levelname == "ERROR" and caplog.records[-1].exc_info
+
+
+def test_safe_never_logs_arguments(api, caplog):
+    with caplog.at_level("INFO", logger="app.api"):
+        api.cancel("summary", "../ARGSECRET")
+    assert "ARGSECRET" not in caplog.text
+
+
+def test_open_log_folder_opens_only_log_dir(api, monkeypatch, data_dirs):
+    from app import logsetup, settings
+    started = []
+    monkeypatch.setattr(api_mod.os, "startfile", lambda p: started.append(p), raising=False)
+    logs = settings.APP_DIR / "logs"
+    monkeypatch.setattr(logsetup, "LOG_DIR", logs)
+    assert api.open_log_folder() == {"ok": True, "data": True}
+    assert started == [str(logs)] and logs.is_dir()
+
+
+def test_open_log_folder_rejects_outside_app_dir(api, monkeypatch, data_dirs):
+    from app import logsetup, settings
+    started = []
+    monkeypatch.setattr(api_mod.os, "startfile", lambda p: started.append(p), raising=False)
+    monkeypatch.setattr(logsetup, "LOG_DIR", data_dirs / "elsewhere")
+    assert api.open_log_folder()["ok"] is False
+    monkeypatch.setattr(logsetup, "LOG_DIR", settings.APP_DIR)  # the app dir itself is not the log dir
+    assert api.open_log_folder()["ok"] is False
+    monkeypatch.setattr(logsetup, "LOG_DIR", settings.APP_DIR / ".." / "outside")
+    assert api.open_log_folder()["ok"] is False
+    assert started == []
+
+
+def test_copy_diagnostics_no_secrets_no_transcript(api, monkeypatch):
+    from app import sessions
+    copied = []
+    monkeypatch.setattr(api_mod.winutil, "set_clipboard_text", lambda t: copied.append(t) or True)
+    monkeypatch.setattr(api._c, "gpu_status", lambda: {"state": "no_gpu"})
+    api._c.s.anthropic_key = "sk-ant-api03-" + "Qq1w2E3r" * 4
+    api._c.s.openai_key = "sk-OPENAIFAKEKEY1234567890"
+    n = api._c.create_note()
+    sessions.load(sessions.SESSIONS_DIR / n["id"]).write("transcript.txt", "TOP SECRET MEETING WORDS")
+    res = api.copy_diagnostics()
+    assert res["ok"] and res["data"]["copied"] is True and res["data"]["chars"] == len(copied[0])
+    for bad in ("Qq1w2E3r", "OPENAIFAKEKEY", "TOP SECRET MEETING"):
+        assert bad not in copied[0]
+
+
+def test_copy_diagnostics_reports_failure(api, monkeypatch):
+    monkeypatch.setattr(api_mod.winutil, "set_clipboard_text", lambda t: False)
+    monkeypatch.setattr(api._c, "gpu_status", lambda: {})
+    assert api.copy_diagnostics()["data"]["copied"] is False
+
+
+def test_restart_app_refused_while_recording(api, monkeypatch):
+    timers = []
+    monkeypatch.setattr(api_mod.threading, "Timer", lambda *a: timers.append(a))
+    api._window = object()
+    api._c.recorder = object()
+    assert api.restart_app()["ok"] is False
+    assert api._restart_requested is False and not timers
+    api._c.recorder = None
+    api._c._pending["n"] = 1
+    assert api.restart_app()["ok"] is False
+    assert not timers
+
+
+def test_restart_app_sets_flag_and_closes_window(api, monkeypatch):
+    fired = []
+
+    class FakeTimer:
+        def __init__(self, delay, fn):
+            fired.append((delay, fn))
+
+        def start(self):
+            fired.append("started")
+
+    class Win:
+        def destroy(self):
+            pass
+
+    monkeypatch.setattr(api_mod.threading, "Timer", FakeTimer)
+    api._window = Win()
+    assert api.restart_app() == {"ok": True, "data": True}
+    assert api._restart_requested is True and api._c.restart_requested is True
+    assert fired[0][0] == 0.3 and fired[0][1] == api._window.destroy and fired[1] == "started"

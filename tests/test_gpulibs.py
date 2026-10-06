@@ -271,13 +271,21 @@ def test_cancel_during_extract_cleans_staging(env):
 
 
 def test_cleanup_stale(env):
+    import os
+    import time
+
     env.root.mkdir(parents=True)
-    (env.root / ".staging-dead").mkdir()
-    (env.root / ".staging-dead" / "w.whl").write_bytes(b"x")
+    dead = env.root / ".staging-dead"
+    dead.mkdir()
+    (dead / "w.whl").write_bytes(b"x")
+    old = time.time() - 2 * gpulibs.STALE_AFTER
+    os.utime(dead, (old, old))
+    fresh = env.root / ".staging-running"  # e.g. another window mid-download: must survive
+    fresh.mkdir()
     keep = env.root / "nvidia-cublas-cu12-1.0"
     keep.mkdir()
     gpulibs.cleanup_stale()
-    assert leftovers(env.root) == [keep.name]
+    assert sorted(leftovers(env.root)) == sorted([keep.name, fresh.name])
 
 
 def test_installer_class_events_and_on_installed_first(env):
