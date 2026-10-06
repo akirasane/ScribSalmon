@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-wordmark.png" alt="ScribSalmon" height="96">
+  <img src="assets/icon-salmon-dark-256.png" alt="ScribSalmon" width="128">
 </p>
 
 <h1 align="center">ScribSalmon</h1>
@@ -166,12 +166,13 @@ app/summarize.py   Claude CLI or Anthropic API: summary prompt + "Check words" r
 app/sessions.py    one folder per note
 app/settings.py    settings.json + data folder resolution
 web/src            React + TypeScript + Tailwind v4 UI (bridge.ts = Python bridge, mock.ts = browser fake)
-tools/             make_icons.py - renders assets/logo.svg to PNGs, .ico and the web favicon
+tools/             make_dark_icon.py - builds the dark app icon (PNGs + .ico) from assets/source/salmon-icon-light.png
 ```
 
 ## Branding
 
-- Edit `assets/logo.svg`, then `.venv\Scripts\python tools\make_icons.py` regenerates the PNGs, `.ico` and the web favicon.
+- The app icon is the **dark** salmon tile: `assets/icon.ico` (exe, installer, taskbar), `web/public/logo.png` + `favicon.ico` (in-app logo, favicon). The light original is kept as `assets/icon-salmon-light-*`.
+- To regenerate the dark variant from `assets/source/salmon-icon-light.png`: `pip install -r requirements-dev.txt`, then `.venv\Scripts\python tools\make_dark_icon.py` (and copy `icon-salmon-dark.ico` over `assets/icon.ico`, `icon-salmon-dark-256.png` over `web/public/logo.png`).
 - Theme colours are the `--color-*` tokens at the top of `web/src/index.css`.
 
 ## CI / releases
@@ -212,6 +213,9 @@ Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run fro
 - **UI not built** (running from source) - `cd web && npm install && npm run build`.
 
 ## Changelog
+
+### 1.4.2
+New salmon app icon in a dark variant, used everywhere (exe, installer, taskbar, in-app logo, favicon).
 
 ### 1.4.1
 Log file and one-click GPU setup.
