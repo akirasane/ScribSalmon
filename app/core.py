@@ -15,7 +15,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import sessions
+from . import gpu, gpuconst, gpulibs, logsetup, sessions
 from . import transcribe as _transcribe
 from .audio import Recorder
 from .sessions import Session
@@ -57,7 +57,15 @@ class Controller:
         self._behind: dict = {}   # note id -> seconds of audio queued/being transcribed
         self._cancels: dict = {}  # (note id, kind) -> threading.Event
         self.updater = Updater(self.emit, lambda: self.s, self._save_update_fields, self._is_idle)
+        self.gpulibs = gpulibs.GpuLibsInstaller(self.emit, self._on_gpu_libs_installed)
+        self._fallback_seen: set = set()  # distinct GPU-fallback reasons already announced this session
+        self.restart_requested = False
         threading.Thread(target=self._cleanup_updates, name="update-cleanup", daemon=True).start()
+
+    def _err(self, msg) -> None:
+        """emit("error") that also leaves a trace in the log file (messages carry no secrets/transcripts)."""
+        log.warning("error shown to user: %s", msg)
+        self.emit("error", msg)
 
     def _is_idle(self) -> bool:
         return self.recorder is None and not self._busy_now()
@@ -65,6 +73,7 @@ class Controller:
     def _cleanup_updates(self):
         try:
             self.updater.cleanup_stale()
+            gpulibs.cleanup_stale()
         except Exception:  # noqa: BLE001 - housekeeping must never matter
             log.info("update cleanup failed", exc_info=True)
 
@@ -209,10 +218,54 @@ class Controller:
                 if gen != self._engine_gen:
                     continue  # settings changed while loading; build again
                 self.engine = eng
+                log.info("engine ready: %s", self._settings_summary())
                 fb = getattr(eng, "fallback_reason", None)
-                if fb:
-                    self.emit("error", f"GPU unavailable, using CPU: {fb}")
+                if fb and fb not in self._fallback_seen:
+                    self._fallback_seen.add(fb)
+                    self.emit("gpu_fallback", {"reason": gpu.explain(fb) or fb, "detail": fb})
                 return eng
+
+    def _settings_summary(self) -> dict:
+        """Non-secret settings only: never keys, vocabulary or prompt text."""
+        s = self.s
+        return {"engine": s.engine, "model": s.whisper_custom or s.whisper_model, "device": s.device,
+                "language": s.language, "live_transcript": s.live_transcript}
+
+    # ---------------------------------------------------------------- GPU
+    def _on_gpu_libs_installed(self) -> dict:
+        gpu.activate(preload=True)
+        self._reset_engine()
+        gpu.invalidate_cache()
+        return self.gpu_status()
+
+    def gpu_status(self) -> dict:
+        eng = self.engine
+        st = gpu.with_engine(gpu.status(), getattr(eng, "device", None) if eng else None,
+                             getattr(eng, "fallback_reason", None) if eng else None)
+        st["download_bytes"] = gpuconst.SIZE
+        st["disk_bytes"] = gpuconst.INSTALLED_BYTES
+        st["eula_url"] = gpuconst.EULA_URL
+        st["libs_folder"] = str(gpuconst.libs_root())
+        return st
+
+    def restart_app(self) -> bool:
+        if not self._is_idle():
+            raise ValueError("Finish recording and transcription before restarting.")
+        self.restart_requested = True
+        return True
+
+    def diagnostics(self) -> str:
+        import platform
+        eng = self.engine
+        return logsetup.diagnostics_text({
+            "version": VERSION,
+            "install mode": install_mode(),
+            "os": platform.platform(),
+            "settings": self._settings_summary(),
+            "gpu": self.gpu_status(),
+            "engine": {"loaded": eng is not None, "device": getattr(eng, "device", None),
+                       "fallback_reason": getattr(eng, "fallback_reason", None)},
+        })
 
     def _reset_engine(self, only=None):
         if only is None or self.engine is only:
@@ -400,7 +453,7 @@ class Controller:
                     if rev is not None:
                         self.emit("text", {"id": note_id, "text": text, "rev": rev})
             except Exception as e:
-                self.emit("error", f"Transcription failed: {e}")
+                self._err(f"Transcription failed: {e}")
                 self._reset_engine(only=eng)
             finally:
                 self.q.task_done()
@@ -420,7 +473,7 @@ class Controller:
                     self._enqueue(note_id, a[i:i + step])
                 self._enqueue(note_id, None)
             except Exception as e:
-                self.emit("error", f"Transcription of {Path(path).name} failed: {e}")
+                self._err(f"Transcription of {Path(path).name} failed: {e}")
             finally:
                 self._add_pending(note_id, -1)
 
@@ -451,7 +504,7 @@ class Controller:
             self.rec_state = state
             rec = Recorder(path, self.s.use_system, self.s.use_mic,
                            on_chunk=(lambda a: self._live_chunk(nid, state, a)) if live else (lambda a: None),
-                           on_error=lambda m: self.emit("error", m),
+                           on_error=lambda m: self._err(m),
                            on_dead=lambda: threading.Thread(target=self._on_rec_dead, args=(rec,),
                                                             daemon=True).start())
             try:
@@ -487,7 +540,7 @@ class Controller:
             time.sleep(0.08)
 
     def _on_rec_dead(self, rec: Recorder):
-        self.emit("error", "All audio sources stopped; recording saved.")
+        self._err("All audio sources stopped; recording saved.")
         self.stop_recording(expected=rec)
 
     def stop_recording(self, expected=None) -> dict:
@@ -573,7 +626,7 @@ class Controller:
             except Cancelled:
                 self.emit("status", "Cancelled")  # the old transcript is untouched
             except Exception as e:
-                self.emit("error", f"Refine failed: {e}")
+                self._err(f"Refine failed: {e}")
                 self._reset_engine(only=eng)
             finally:
                 self._end_task(nid, "refine")
@@ -599,7 +652,7 @@ class Controller:
                 self.emit("status", "Cancelled")
             except Exception as e:
                 self.emit("review", {"id": note_id, "items": None})
-                self.emit("error", f"Review failed: {e}")
+                self._err(f"Review failed: {e}")
             finally:
                 self._end_task(nid, "review")
 
@@ -632,7 +685,7 @@ class Controller:
                 self.emit("status", "Cancelled")
             except Exception as e:
                 self.emit("summary", {"id": note_id, "markdown": None})
-                self.emit("error", f"Summary failed: {e}")
+                self._err(f"Summary failed: {e}")
             finally:
                 self._end_task(nid, "summary")
 
@@ -640,3 +693,7 @@ class Controller:
 
     def shutdown(self):
         self.stop_recording()
+        try:
+            self.gpulibs.cancel()
+        except Exception:  # noqa: BLE001
+            log.info("gpu download cancel failed", exc_info=True)
