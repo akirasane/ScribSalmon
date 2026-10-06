@@ -117,7 +117,7 @@ def is_newer(remote, local) -> bool:
 
 # ---------------------------------------------------------------- network
 
-def check_url(url) -> None:
+def check_url(url, hosts=ALLOWED_HOSTS) -> None:
     if not isinstance(url, str):
         raise UpdateError("Blocked URL")
     try:
@@ -130,7 +130,7 @@ def check_url(url) -> None:
     if u.username is not None or u.password is not None or "@" in u.netloc:
         raise UpdateError("Blocked URL: credentials not allowed")
     host = (u.hostname or "").lower()
-    if host not in ALLOWED_HOSTS:
+    if host not in hosts:
         raise UpdateError(f"Blocked URL: host {host!r} not allowed")
     if port not in (None, 443):
         raise UpdateError("Blocked URL: port not allowed")
@@ -139,26 +139,27 @@ def check_url(url) -> None:
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     max_redirections = MAX_REDIRECTS
 
-    def __init__(self):
+    def __init__(self, hosts=ALLOWED_HOSTS):
         self._count = 0
+        self._hosts = hosts
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        check_url(newurl)
+        check_url(newurl, self._hosts)
         self._count += 1
         if self._count > MAX_REDIRECTS:
             raise UpdateError("Too many redirects")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _open(url, max_bytes, accept):
+def _open(url, max_bytes, accept, hosts=ALLOWED_HOSTS, timeout=TIMEOUT):
     """GET `url` and return the response (caller reads/closes). Declared Content-Length is checked up front."""
-    check_url(url)
-    opener = urllib.request.build_opener(_SafeRedirect(),
+    check_url(url, hosts)
+    opener = urllib.request.build_opener(_SafeRedirect(hosts),
                                          urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept}, method="GET")
-    resp = opener.open(req, timeout=TIMEOUT)
+    resp = opener.open(req, timeout=timeout)
     try:
-        check_url(resp.geturl())
+        check_url(resp.geturl(), hosts)
         cl = resp.headers.get("Content-Length")
         if cl is not None and cl.isdigit() and int(cl) > max_bytes:
             raise UpdateError("Response too large")
@@ -282,6 +283,7 @@ def download(rel: Release, on_progress=None, cancel: Optional[threading.Event] =
     if rel.setup_name != f"ScribSalmon-Setup-{rel.version}.exe":
         raise UpdateError("Unexpected installer name.")
     check_url(rel.setup_url)
+    log.info("downloading installer %s", rel.setup_name)
     sums_url = rel.sums_url or f"{DOWNLOAD_PREFIX}{rel.tag}/{SUMS_NAME}"
     sums = parse_sums(_read_all(sums_url, MAX_SUMS, "text/plain, application/octet-stream"))
     expected = sums.get(rel.setup_name)
@@ -321,6 +323,7 @@ def download(rel: Release, on_progress=None, cancel: Optional[threading.Event] =
             raise UpdateError("Download is incomplete.")
         if h.hexdigest() != expected:
             raise UpdateError("Checksum mismatch; the download was discarded.")
+        log.info("installer downloaded and SHA-256 verified (%d bytes)", received)
         if on_progress:
             on_progress(received, rel.setup_size or received)
     except BaseException as e:
@@ -475,6 +478,7 @@ class Updater:
                             bool(_get(s, "check_updates", True)), force):
             return self._result(None, False, False)
         try:
+            log.info("checking for updates (current %s, force=%s)", VERSION, force)
             rel = fetch_latest()
             self._save({"last_update_check": time.time()})
         except Exception as e:
@@ -483,6 +487,7 @@ class Updater:
             log.info("update check failed: %s", e)
             return self._result(None, False, False)
         available = bool(rel and is_newer(rel.version, VERSION))
+        log.info("update check: latest=%s available=%s", rel.version if rel else None, available)
         with self._lock:
             self._release = rel if available else None
         skipped = bool(available and _get(s, "skipped_version", "") == rel.version)
@@ -552,5 +557,6 @@ class Updater:
         except BaseException:
             _release_lock()
             raise
+        log.info("launching installer for version %s", rel.version)
         self.quitting = True
         return True

@@ -129,8 +129,8 @@ begin
   Result := True;
   if CurPageID = wpSelectDir then begin
     d := Lowercase(RemoveBackslashUnlessRoot(WizardDirValue));
-    if (d = Lowercase(ExpandConstant('{userdocs}\ScribSalmon'))) or (d = Lowercase(ExpandConstant('{userappdata}\ScribSalmon'))) then begin
-      MsgBox('That folder holds your ScribSalmon notes/settings. Choose another install folder.', mbError, MB_OK);
+    if (d = Lowercase(ExpandConstant('{userdocs}\ScribSalmon'))) or (d = Lowercase(ExpandConstant('{userappdata}\ScribSalmon'))) or (d = Lowercase(ExpandConstant('{localappdata}\ScribSalmon'))) then begin
+      MsgBox('That folder holds your ScribSalmon notes, settings or downloaded GPU libraries. Choose another install folder.', mbError, MB_OK);
       Result := False;
     end;
   end;
@@ -140,9 +140,19 @@ begin
   Result := EnsureAppClosed();
 end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var LocalDir: String;
 begin
-  if (CurUninstallStep = usPostUninstall) and (not UninstallSilent()) then
+  if CurUninstallStep <> usPostUninstall then Exit;
+  if not UninstallSilent() then
     if MsgBox('Also delete ScribSalmon settings (including saved API keys) in ' + ExpandConstant('{userappdata}\ScribSalmon') + '?'#13#10#13#10 +
-              'Your notes in Documents\ScribSalmon are kept either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDNO then Exit
-    else DelTree(ExpandConstant('{userappdata}\ScribSalmon'), True, True, True);
+              'Your notes in Documents\ScribSalmon are kept either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      DelTree(ExpandConstant('{userappdata}\ScribSalmon'), True, True, True);
+  // NVIDIA GPU libraries downloaded by the app (never part of this installer): ask when interactive, delete when silent
+  LocalDir := ExpandConstant('{localappdata}\ScribSalmon');
+  if DirExists(LocalDir + '\gpu-libs') then
+    if UninstallSilent() or (MsgBox('Delete downloaded NVIDIA GPU libraries (~735 MB)?', mbConfirmation, MB_YESNO) = IDYES) then
+    begin
+      DelTree(LocalDir + '\gpu-libs', True, True, True);
+      RemoveDir(LocalDir);   // only succeeds when empty
+    end;
 end;
