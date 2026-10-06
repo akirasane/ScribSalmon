@@ -1,15 +1,20 @@
 """Pluggable speech-to-text engines."""
 import gc
 import io
+import logging
 import os
 import re
+import time
 import wave
 from abc import ABC, abstractmethod
 from typing import Optional
 
 import numpy as np
 
+from . import gpu
 from .errors import Cancelled
+
+log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 SILENCE_RMS = 0.003
@@ -82,25 +87,55 @@ class LocalWhisper(Engine):
         self.fallback_reason: Optional[str] = None
         self.model = None
         self.device = "cpu"
+        self.compute = "int8"
+        t0 = time.monotonic()
         want = "cuda" if device == "cuda" or (device == "auto" and _cuda_count() > 0) else "cpu"
         if want == "cuda":
             try:
-                self._load("cuda", "float16")
+                gpu.activate(preload=True)
+            except Exception:
+                log.warning("GPU activation failed", exc_info=True)
+            missing = gpu.missing_dlls()
+            if missing:
+                reason = gpu.explain(f"Library {missing[0]} is not found or cannot be loaded")
+                if device == "cuda":
+                    raise RuntimeError(reason)
+                self.fallback_reason = reason
+                log.warning("CUDA skipped: %s", reason)
+                want = "cpu"
+        if want == "cuda":
+            try:
+                self._load("cuda", self._cuda_compute())
                 self._warmup()
             except Exception as e:
                 if device == "cuda":
-                    raise RuntimeError(f"CUDA requested but not usable: {e}") from e
-                self.fallback_reason = str(e)
+                    raise RuntimeError(f"CUDA requested but not usable: {gpu.explain(e)}") from e
+                self.fallback_reason = gpu.explain(e)
+                log.warning("CUDA failed, falling back to CPU: %s", e, exc_info=True)
                 self.model = None
                 gc.collect()
                 self._load("cpu", "int8")
         else:
             self._load("cpu", "int8")
+        log.info("engine loaded model=%s device=%s compute=%s in %.1f s", model_name, self.device,
+                 self.compute, time.monotonic() - t0)
+
+    @staticmethod
+    def _cuda_compute() -> str:
+        try:
+            import ctranslate2
+            types = ctranslate2.get_supported_compute_types("cuda")
+            if "float16" not in types and "int8_float32" in types:
+                return "int8_float32"
+        except Exception:
+            pass
+        return "float16"
 
     def _load(self, dev: str, compute: str):
         from faster_whisper import WhisperModel  # lazy: slow import + model download
         self.model = WhisperModel(self.model_name, device=dev, compute_type=compute)
         self.device = dev
+        self.compute = compute
 
     def _warmup(self):
         segs, _ = self.model.transcribe(np.zeros(SAMPLE_RATE, np.float32), language="en", beam_size=1,
@@ -113,7 +148,8 @@ class LocalWhisper(Engine):
             return self._transcribe(audio, language, prompt, long_form, should_stop)
         except RuntimeError as e:
             if self.device == "cuda" and self.requested == "auto" and _CUDA_ERR.search(str(e)):
-                self.fallback_reason = str(e)
+                self.fallback_reason = gpu.explain(e)
+                log.warning("CUDA failed during transcribe, falling back to CPU: %s", e, exc_info=True)
                 self.model = None
                 gc.collect()
                 self._load("cpu", "int8")
