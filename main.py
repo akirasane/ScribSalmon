@@ -3,16 +3,19 @@
     python main.py          run the built UI (web/dist)
     python main.py --dev    use the Vite dev server (http://127.0.0.1:5173) with devtools
 """
+import logging
+import subprocess
 import sys
 import threading
-import traceback
 import webbrowser
 from pathlib import Path
 
 import webview
 
-from app import winutil
+from app import logsetup, winutil
 from app.api import Api
+
+log = logging.getLogger("main")
 
 # PyInstaller unpacks bundled data under sys._MEIPASS; from source it is the folder of this file
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -65,7 +68,7 @@ def _harden(window, allowed: str) -> None:
                 if uri.lower().startswith(("http://", "https://")):
                     webbrowser.open(uri, new=2)
             except Exception:
-                traceback.print_exc()
+                log.exception("window hardening failed")
 
         def setup():
             try:
@@ -75,11 +78,27 @@ def _harden(window, allowed: str) -> None:
                 except Exception:
                     pass
             except Exception:
-                traceback.print_exc()
+                log.exception("window hardening failed")
 
         window.native.Invoke(Action(setup))
     except Exception:
-        traceback.print_exc()
+        log.exception("window hardening failed")
+
+
+def _relaunch() -> None:
+    """Start a fresh copy of the app (after the window closed) for a requested restart."""
+    argv = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve())]
+    kw = dict(shell=False, close_fds=True, stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    log.info("restarting application")
+    try:
+        subprocess.Popen(argv, creationflags=base | 0x01000000, **kw)  # | CREATE_BREAKAWAY_FROM_JOB
+    except OSError:
+        try:
+            subprocess.Popen(argv, creationflags=base, **kw)
+        except OSError:
+            log.exception("restart failed")
 
 
 def main() -> int:
@@ -88,14 +107,25 @@ def main() -> int:
         i = sys.argv.index("--selftest")
         out = sys.argv[i + 1] if i + 1 < len(sys.argv) else None
         return selftest.run(out)
-    winutil.create_app_mutex(APP_MUTEX)  # lets the installer detect a running instance
     dev = "--dev" in sys.argv
+    logsetup.setup(dev=dev)
+    try:
+        from app import gpu
+        gpu.activate()
+    except ImportError:
+        pass
+    except Exception:
+        log.exception("GPU library activation failed")
+    winutil.create_app_mutex(APP_MUTEX)  # lets the installer detect a running instance
     if dev:
         url = "http://127.0.0.1:5173"
     elif DIST.exists():
         url = str(DIST)
     else:
-        print("UI not built. Run:  cd web && npm install && npm run build", file=sys.stderr)
+        msg = "UI not built. Run:  cd web && npm install && npm run build"
+        log.error(msg)
+        if sys.stderr is not None:
+            print(msg, file=sys.stderr)
         return 1
 
     winutil.set_app_user_model_id(APP_ID)
@@ -163,6 +193,8 @@ def main() -> int:
     # never let target=_blank / window.open load in-app; NavigationStarting guard sends http(s) to the browser
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
     webview.start(debug=dev)
+    if getattr(api, "_restart_requested", False):
+        _relaunch()
     return 0
 
 
