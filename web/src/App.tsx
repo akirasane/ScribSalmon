@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { Plus } from 'lucide-react'
 import { bridge, on } from './bridge'
 import { appendLine } from './lib'
-import type { Backlog, Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, TaskKind, Toast, UpdateCheck, UpdateInfo, UpdatePhase } from './types'
+import type { Backlog, Note, NoteBrief, NotePatch, RecState, ReviewItem, Settings, SettingsPatch, TaskKind, Toast, UpdateCheck, UpdateInfo, UpdatePhase, GpuStatus, GpuProgress, GpuFallback } from './types'
 import Aurora from './components/bits/Aurora'
 import BlurText from './components/bits/BlurText'
 import Logo from './components/Logo'
@@ -12,6 +12,7 @@ import NoteView from './components/NoteView'
 import SettingsModal from './components/SettingsModal'
 import ReviewModal from './components/ReviewModal'
 import UpdateBanner from './components/UpdateBanner'
+import type { GpuDownload } from './components/GpuPanel'
 import { Button, Modal, Toasts } from './components/ui'
 
 export default function App() {
@@ -47,11 +48,13 @@ export default function App() {
   const dirtyFields = useRef(new Set<'title' | 'transcript' | 'summary'>())
   const timer = useRef<number | undefined>(undefined)
   const toastId = useRef(0)
+  const [gpu, setGpu] = useState<GpuStatus | null>(null)
+  const [gpuDl, setGpuDl] = useState<GpuDownload>({ active: false, progress: null, error: '' })
 
-  const toast = useCallback((kind: Toast['kind'], text: string) => {
+  const toast = useCallback((kind: Toast['kind'], text: string, action?: Toast['action']) => {
     const id = ++toastId.current
-    setToasts((t) => [...t, { id, kind, text }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === 'error' ? 8000 : 4000)
+    setToasts((t) => [...t, { id, kind, text, action }])
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 12000 : kind === 'error' ? 8000 : 4000)
   }, [])
   const guard = useCallback(
     async <T,>(p: Promise<T>): Promise<T | undefined> => {
@@ -209,6 +212,26 @@ export default function App() {
         setUpdError(message)
         setUpdPhase('error')
       }),
+      on('gpu_progress', (p: GpuProgress) => {
+        setGpuDl({ active: true, progress: p, error: '' })
+      }),
+      on('gpu_ready', ({ status: st }: { status?: GpuStatus }) => {
+        setGpuDl({ active: false, progress: null, error: '' })
+        if (st) setGpu(st)
+        else bridge.gpuStatus().then(setGpu).catch(() => {})
+        toast('info', 'GPU libraries installed - used from the next transcription')
+      }),
+      on('gpu_error', ({ message }: { message: string }) => {
+        setGpuDl({ active: false, progress: null, error: message })
+        toast('error', message)
+      }),
+      on('gpu_fallback', ({ reason }: GpuFallback) => {
+        toast('error', `GPU unavailable, using CPU: ${reason}`, {
+          label: 'Open Settings → GPU',
+          onClick: () => void openSettingsRef.current(),
+        })
+        bridge.gpuStatus().then(setGpu).catch(() => {})
+      }),
       on('status', (m: string) => setStatus(m)),
       on('busy', (b: boolean) => setBusy(b)),
       on('error', (m: string) => toast('error', m)),
@@ -362,6 +385,28 @@ export default function App() {
     }
     setSettingsOpen(true)
   }
+  const openSettingsRef = useRef(openSettings)
+  openSettingsRef.current = openSettings
+
+  // fresh GPU status every time Settings opens
+  useEffect(() => {
+    if (settingsOpen) bridge.gpuStatus().then(setGpu).catch(() => {})
+  }, [settingsOpen])
+
+  const startGpuDownload = async () => {
+    setGpuDl({ active: true, progress: { pct: 0, received: 0, total: 0, phase: 'download' }, error: '' })
+    if (!(await guard(bridge.downloadGpuLibs()))) setGpuDl((d) => (d.error ? d : { active: false, progress: null, error: '' }))
+  }
+
+  const cancelGpuDownload = async () => {
+    await guard(bridge.cancelGpuDownload())
+    setGpuDl({ active: false, progress: null, error: '' })
+  }
+
+  const restartApp = async () => {
+    await flush()
+    await guard(bridge.restartApp())
+  }
 
   const start = async () => {
     if (!note) return
@@ -491,6 +536,20 @@ export default function App() {
         settings={settings}
         onClose={() => setSettingsOpen(false)}
         onCheckUpdates={checkUpdatesNow}
+        gpu={{
+          status: gpu,
+          download: gpuDl,
+          onDownload: startGpuDownload,
+          onCancel: cancelGpuDownload,
+          onRestart: restartApp,
+          onOpenLogFolder: async () => {
+            await guard(bridge.openLogFolder())
+          },
+          onCopyDiagnostics: async () => {
+            const ok = await guard(bridge.copyDiagnostics())
+            if (ok !== undefined) toast(ok ? 'info' : 'error', ok ? 'Diagnostics copied to the clipboard' : 'Could not copy diagnostics to the clipboard')
+          },
+        }}
         onSave={async (s) => {
           const saved = await guard(bridge.saveSettings(s))
           if (saved) setSettings(saved)

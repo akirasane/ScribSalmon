@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ComponentProps } from 'react'
 import { RotateCcw } from 'lucide-react'
 import type { Settings, SettingsPatch, UpdateCheck } from '../types'
+import GpuPanel from './GpuPanel'
 import { Button, Modal, Select, Toggle } from './ui'
 
 interface Props {
@@ -10,6 +11,8 @@ interface Props {
   onSave: (s: SettingsPatch) => Promise<void>
   /** Forced update check; resolves with the result, rejects with a readable message */
   onCheckUpdates: () => Promise<UpdateCheck>
+  /** GPU status/download wiring (state lives in App) */
+  gpu: ComponentProps<typeof GpuPanel>
 }
 
 const input =
@@ -34,7 +37,7 @@ function keyPlaceholder(source: Settings['anthropic_key_source'], envVar: string
   return 'Not set'
 }
 
-export default function SettingsModal({ open, settings, onClose, onSave, onCheckUpdates }: Props) {
+export default function SettingsModal({ open, settings, onClose, onSave, onCheckUpdates, gpu }: Props) {
   const [d, setD] = useState<Settings | null>(settings)
   const [saving, setSaving] = useState(false)
   const [clear, setClear] = useState<Record<KeyName, boolean>>({ anthropic: false, openai: false })
@@ -106,6 +109,10 @@ export default function SettingsModal({ open, settings, onClose, onSave, onCheck
               ]}
             />
           </Field>
+          <div className="space-y-2 pt-1">
+            <span className="text-[11px] font-semibold tracking-[0.12em] text-mute uppercase">GPU / Performance</span>
+            <GpuPanel {...gpu} />
+          </div>
           <Field label="Custom model (optional)">
             <input
               className={input}

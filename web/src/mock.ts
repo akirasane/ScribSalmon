@@ -49,6 +49,32 @@ export function createMock(emit: (n: string, p: unknown) => void) {
   const fakeUpdate = new URLSearchParams(location.search).has('update')
   let dl: number | null = null
   const stopDl = () => { if (dl !== null) clearInterval(dl); dl = null }
+  // `?gpu=none|missing|ready|active` picks the fake GPU state (default: missing); `?gpu=fail` errors the download
+  const gpuParam = new URLSearchParams(location.search).get('gpu') ?? 'missing'
+  let gpuState: string = ['none', 'missing', 'ready', 'active'].includes(gpuParam) ? ({ none: 'no_gpu', missing: 'libs_missing' } as Record<string, string>)[gpuParam] ?? gpuParam : 'libs_missing'
+  let gpuInstalled = gpuState === 'ready' || gpuState === 'active'
+  let gdl: number | null = null
+  const stopGdl = () => { if (gdl !== null) clearInterval(gdl); gdl = null }
+  const gpuStatus = () => {
+    const present = gpuState !== 'no_gpu'
+    const messages: Record<string, string> = {
+      no_gpu: 'No NVIDIA GPU detected - transcription runs on the CPU.',
+      libs_missing: 'NVIDIA GPU found, but the CUDA 12 cuBLAS libraries are missing.',
+      ready: 'GPU ready - used for the next transcription.',
+      active: 'Transcribing on the GPU (float16).',
+      failed: 'GPU libraries installed but CUDA failed to load.',
+    }
+    return {
+      state: gpuState, gpu_present: present,
+      gpus: present ? [{ name: 'NVIDIA GeForce RTX 4080', driver: '616.92', vram_mb: 16376, compute_cap: '8.9' }] : [],
+      gpu_name: present ? 'NVIDIA GeForce RTX 4080' : '', driver: present ? '616.92' : '', driver_cuda: present ? '13.4' : '',
+      vram_mb: present ? 16376 : null, compute_cap: present ? '8.9' : '', cuda_device_count: gpuInstalled ? 1 : 0,
+      required_dlls: ['cublas64_12.dll', 'cublasLt64_12.dll'], dlls: {}, missing_dlls: present && !gpuInstalled ? ['cublas64_12.dll', 'cublasLt64_12.dll'] : [],
+      libs_dir: gpuInstalled ? 'C:\Users\me\AppData\Local\ScribSalmon\gpu-libs\cublas-12.9.2' : null,
+      libs_installed_version: gpuInstalled ? '12.9.2' : null, cuda_ok: gpuState === 'ready' || gpuState === 'active',
+      message: messages[gpuState] ?? '', hint: gpuState === 'libs_missing' ? 'Settings -> GPU -> Download GPU libraries (one click).' : '',
+    }
+  }
   const brief = (n: Note) => ({ id: n.id, title: n.title, created: n.created, duration: n.duration, parts: n.parts })
   const ok = <T,>(data: T) => Promise.resolve({ ok: true as const, data })
   const find = (id: string) => notes.find((n) => n.id === id)!
@@ -153,6 +179,25 @@ export function createMock(emit: (n: string, p: unknown) => void) {
     cancel_update: () => { const was = dl !== null; stopDl(); return ok(was) },
     skip_update: (v: string) => { settings.skipped_version = v; return ok(true) },
     install_update: () => ok(true),
+    gpu_status: () => ok(gpuStatus()),
+    download_gpu_libs: () => {
+      stopGdl()
+      let pct = 0
+      const total = 553162896
+      const fail = gpuParam === 'fail'
+      gdl = window.setInterval(() => {
+        pct = Math.min(100, pct + 4)
+        if (fail && pct >= 40) { stopGdl(); emit('gpu_error', { message: 'Download failed: connection reset. Try again.' }); return }
+        const phase = pct < 80 ? 'download' : pct < 90 ? 'verify' : 'extract'
+        emit('gpu_progress', { pct, received: Math.round((total * Math.min(pct, 80)) / 80), total, phase })
+        if (pct >= 100) { stopGdl(); gpuInstalled = true; gpuState = 'ready'; emit('gpu_ready', { status: gpuStatus() }) }
+      }, 250)
+      return ok(true)
+    },
+    cancel_gpu_download: () => { const was = gdl !== null; stopGdl(); return ok(was) },
+    open_log_folder: () => ok(true),
+    copy_diagnostics: () => ok(true),
+    restart_app: () => ok(true),
     get_settings: () => ok({ ...settings }),
     save_settings: (s: any) => { settings = { ...settings, ...s }; return ok({ ...settings }) },
   }
