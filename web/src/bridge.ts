@@ -1,4 +1,4 @@
-import type { TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch, UpdateCheck, GpuStatus } from './types'
+import type { AudioDevices, TaskKind, Note, NoteBrief, NotePatch, RecState, SaveResult, Settings, SettingsPatch, UpdateCheck, GpuStatus } from './types'
 
 type Res<T> = { ok: true; data: T } | { ok: false; error: string }
 type Listener = (payload: any) => void
@@ -68,6 +68,7 @@ export const bridge = {
   exportNote: (id: string) => call<string | null>('export_note', id),
   startRecording: (id: string, opts: Record<string, unknown>) => call<RecState>('start_recording', id, opts),
   stopRecording: () => call<NoteBrief>('stop_recording'),
+  listAudioDevices: () => call<AudioDevices>('list_audio_devices'),
   addWav: (id: string) => call<NoteBrief | null>('add_wav', id),
   summarize: (id: string, transcript: string) => call<boolean>('summarize', id, transcript),
   retranscribe: (id: string) => call<boolean>('retranscribe', id),

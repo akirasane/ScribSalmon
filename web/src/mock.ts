@@ -40,7 +40,7 @@ export function createMock(emit: (n: string, p: unknown) => void) {
   ]
   let rec: { id: string; t: number; timers: number[] } | null = null
   let settings: any = {
-    engine: 'local', language: 'auto', whisper_model: 'small', use_system: true, use_mic: true,
+    engine: 'local', language: 'auto', whisper_model: 'small', use_system: true, use_mic: true, system_device: '', mic_device: '',
     live_transcript: true, summary_backend: 'auto', summary_prompt: '', device: 'auto', anthropic_key: '', openai_key: '',
     has_anthropic_key: false, has_openai_key: false, anthropic_key_source: '', openai_key_source: '',
     whisper_custom: '', vocabulary: '', claude_model: 'claude-sonnet-5-5', version: 'dev', check_updates: true, last_update_check: 0, skipped_version: '', install_mode: 'installed', default_prompt: 'You are a meeting-minutes assistant...\n\n## Overview\n...',
@@ -125,6 +125,7 @@ export function createMock(emit: (n: string, p: unknown) => void) {
       emit('recording', { id: null }); emit('status', 'Recording saved.'); emit('notes', null)
       return ok(brief(n))
     },
+    list_audio_devices: () => ok({ speakers: ['Speakers (Realtek Audio)', 'Headset (WH-1000XM5)'], mics: ['Microphone (Realtek Audio)', 'Headset Mic (WH-1000XM5)'], default_speaker: 'Speakers (Realtek Audio)', default_mic: 'Microphone (Realtek Audio)' }),
     add_wav: () => ok(null),
     summarize: (id: string) => {
       emit('busy', true); emit('tasks', { id, tasks: ['summary'] }); emit('status', 'Summarizing with Claude…')

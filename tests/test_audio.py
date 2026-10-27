@@ -73,3 +73,34 @@ def test_recorder_cuts_at_pause_and_flushes_tail(tmp_path, monkeypatch):
     assert [len(c) for c in chunks] == [BLOCK * 53, BLOCK * 47]
     with wave.open(str(wav)) as w:
         assert w.getnframes() == len(sig)
+
+
+class _FakeSd:
+    class default:
+        device = (1, 3)
+
+    @staticmethod
+    def query_devices(i=None):
+        devs = [
+            {"name": "Mic MME", "max_input_channels": 2, "hostapi": 0},
+            {"name": "Mic WASAPI", "max_input_channels": 2, "hostapi": 1},
+            {"name": "Out WASAPI", "max_input_channels": 0, "hostapi": 1},
+            {"name": "Headset WASAPI", "max_input_channels": 1, "hostapi": 1},
+        ]
+        return devs if i is None else devs[i]
+
+
+def test_input_devices_default_host_api_only():
+    from app.audio import _input_devices
+    assert _input_devices(_FakeSd) == [(1, "Mic WASAPI"), (3, "Headset WASAPI")]
+
+
+def test_device_names_round_trip_in_settings():
+    from app.settings import coerce_patch
+    assert coerce_patch({"system_device": "Headset", "mic_device": ""}) == {"system_device": "Headset", "mic_device": ""}
+    try:
+        coerce_patch({"mic_device": 3})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-string device accepted")

@@ -507,6 +507,7 @@ class Controller:
             rec = Recorder(path, self.s.use_system, self.s.use_mic,
                            on_chunk=(lambda a: self._live_chunk(nid, state, a)) if live else (lambda a: None),
                            on_error=lambda m: self._err(m),
+                           system_device=self.s.system_device, mic_device=self.s.mic_device,
                            on_dead=lambda: threading.Thread(target=self._on_rec_dead, args=(rec,),
                                                             daemon=True).start())
             try:
@@ -531,7 +532,8 @@ class Controller:
             behind = self._behind.get(nid, 0.0)
         if behind > BACKLOG_FALLBACK_SECS:
             state["fallback"] = True
-            self.emit("status", "Live transcription fell behind; the rest will be transcribed after Stop.")
+            self._err("Live transcription fell behind; the rest will be transcribed after Stop. "
+                      "Use a smaller model or a GPU for live transcripts.")
             return
         state["fed"] += self._secs(audio)
         self._enqueue(nid, audio)

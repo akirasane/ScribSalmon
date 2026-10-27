@@ -117,6 +117,11 @@ class Api:
         return self._c.stop_recording()
 
     @_safe
+    def list_audio_devices(self):
+        from .audio import list_devices
+        return list_devices()
+
+    @_safe
     def add_wav(self, note_id):
         res = self._window.create_file_dialog(
             webview.OPEN_DIALOG, file_types=("Audio (*.wav;*.mp3;*.m4a;*.flac;*.ogg;*.mp4)",))

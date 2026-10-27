@@ -72,6 +72,8 @@ class Settings:
     vocabulary: str = ""  # names / terms hint passed to Whisper and the Thai review
     use_system: bool = True
     use_mic: bool = True
+    system_device: str = ""  # output device captured via loopback; "" = Windows default
+    mic_device: str = ""  # input device name; "" = Windows default
     live_transcript: bool = True  # False: record only, transcribe after Stop
     summary_backend: str = "auto"  # auto | cli | api
     summary_prompt: str = ""  # empty = built-in default

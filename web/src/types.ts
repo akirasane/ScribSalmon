@@ -28,6 +28,10 @@ export interface Settings {
   vocabulary: string
   use_system: boolean
   use_mic: boolean
+  /** Output device captured via loopback ('' = Windows default) */
+  system_device: string
+  /** Microphone name ('' = Windows default) */
+  mic_device: string
   live_transcript: boolean
   summary_backend: 'auto' | 'cli' | 'api'
   summary_prompt: string
@@ -151,4 +155,11 @@ export type SaveResult = NoteBrief & {
   summary_rev: number
   appended?: string[]
   conflict?: string[]
+}
+
+export interface AudioDevices {
+  speakers: string[]
+  mics: string[]
+  default_speaker: string
+  default_mic: string
 }

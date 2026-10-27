@@ -31,6 +31,53 @@ def _com_uninit(owned: bool) -> None:
             pass
 
 
+def _input_devices(sd) -> list:
+    """(index, name) of input devices on the default input's host API, so one physical mic is not
+    listed once per Windows host API (MME / DirectSound / WASAPI / WDM-KS)."""
+    devs = sd.query_devices()
+    try:
+        api = devs[sd.default.device[0]]["hostapi"]
+    except Exception:
+        api = None
+    return [(i, d["name"]) for i, d in enumerate(devs)
+            if d["max_input_channels"] > 0 and (api is None or d["hostapi"] == api)]
+
+
+def _list_devices_worker(out: dict) -> None:
+    com = False
+    try:
+        import soundcard as sc  # see _LoopSource.run for the import / COM order
+        com = _com_init()
+        out["speakers"] = [str(s.name) for s in sc.all_speakers()]
+        try:
+            out["default_speaker"] = str(sc.default_speaker().name)
+        except Exception:
+            pass
+    except Exception as e:
+        out["speaker_error"] = str(e)
+    finally:
+        _com_uninit(com)
+    try:
+        import sounddevice as sd
+        out["mics"] = [n for _, n in _input_devices(sd)]
+        try:
+            out["default_mic"] = sd.query_devices(sd.default.device[0])["name"]
+        except Exception:
+            pass
+    except Exception as e:
+        out["mic_error"] = str(e)
+
+
+def list_devices(timeout: float = 5.0) -> dict:
+    """Output devices (for loopback capture) and input devices (microphones), by name.
+    Enumerated on a worker thread that owns its COM apartment."""
+    out: dict = {"speakers": [], "mics": [], "default_speaker": "", "default_mic": ""}
+    t = threading.Thread(target=_list_devices_worker, args=(out,), daemon=True)
+    t.start()
+    t.join(timeout)
+    return out
+
+
 def pick_cut(block_rms: list, min_blocks: int = 40, max_blocks: int = 100,
              silence_rms: float = 0.01) -> Optional[int]:
     """Choose where to cut a live chunk, working on 0.1 s blocks of pending audio.
@@ -58,9 +105,11 @@ def pick_cut(block_rms: list, min_blocks: int = 40, max_blocks: int = 100,
 class _LoopSource(threading.Thread):
     """System audio via WASAPI loopback (soundcard). All COM work happens inside this thread."""
 
-    def __init__(self, stop: threading.Event):
+    def __init__(self, stop: threading.Event, device: str = "", warn: Optional[Callable[[str], None]] = None):
         super().__init__(daemon=True)
         self.stop_evt = stop
+        self.device = device
+        self.warn = warn
         self.buf: deque = deque()
         self.lock = threading.Lock()
         self.error: Optional[Exception] = None
@@ -71,8 +120,13 @@ class _LoopSource(threading.Thread):
         try:
             import soundcard as sc  # lazy; must come first (its import-time COM init rejects S_FALSE)
             com = _com_init()  # ...and it only initialises COM in the thread that first imports it
-            spk = sc.default_speaker()
-            mic = sc.get_microphone(id=str(spk.name), include_loopback=True)
+            name = self.device
+            if name and not any(str(x.name) == name for x in sc.all_speakers()):
+                if self.warn:
+                    self.warn(f"Output device '{name}' not found; using the default.")
+                name = ""
+            name = name or str(sc.default_speaker().name)
+            mic = sc.get_microphone(id=name, include_loopback=True)
             with mic.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=BLOCK) as rec:
                 self.ready.set()
                 while not self.stop_evt.is_set():
@@ -95,9 +149,11 @@ class _LoopSource(threading.Thread):
 class _MicSource(threading.Thread):
     """Microphone via PortAudio (soundcard asserts on some mic formats)."""
 
-    def __init__(self, stop: threading.Event):
+    def __init__(self, stop: threading.Event, device: str = "", warn: Optional[Callable[[str], None]] = None):
         super().__init__(daemon=True)
         self.stop_evt = stop
+        self.device = device
+        self.warn = warn
         self.buf: deque = deque()
         self.lock = threading.Lock()
         self.error: Optional[Exception] = None
@@ -110,7 +166,13 @@ class _MicSource(threading.Thread):
     def run(self):
         try:
             import sounddevice as sd  # lazy
-            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=self._cb):
+            idx = None
+            if self.device:
+                idx = next((i for i, n in _input_devices(sd) if n == self.device), None)
+                if idx is None and self.warn:
+                    self.warn(f"Microphone '{self.device}' not found; using the default.")
+            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", device=idx,
+                                callback=self._cb):
                 self.ready.set()
                 self.stop_evt.wait()
         except Exception as e:
@@ -130,7 +192,9 @@ class Recorder:
 
     def __init__(self, wav_path: Path, use_system: bool, use_mic: bool,
                  on_chunk: Callable[[np.ndarray], None], on_error: Callable[[str], None],
-                 chunk_sec: float = 6.0, on_dead: Optional[Callable[[], None]] = None):
+                 chunk_sec: float = 6.0, on_dead: Optional[Callable[[], None]] = None,
+                 system_device: str = "", mic_device: str = ""):
+        self.system_device, self.mic_device = system_device, mic_device
         self.wav_path, self.use_system, self.use_mic = wav_path, use_system, use_mic
         self.on_chunk, self.on_error, self.chunk_sec = on_chunk, on_error, chunk_sec
         self.on_dead = on_dead
@@ -143,9 +207,9 @@ class Recorder:
     def start(self, timeout: float = 3.0):
         sources = []
         if self.use_system:
-            sources.append(_LoopSource(self._stop))
+            sources.append(_LoopSource(self._stop, self.system_device, self.on_error))
         if self.use_mic:
-            sources.append(_MicSource(self._stop))
+            sources.append(_MicSource(self._stop, self.mic_device, self.on_error))
         if not sources:
             raise RuntimeError("No audio source selected.")
 
