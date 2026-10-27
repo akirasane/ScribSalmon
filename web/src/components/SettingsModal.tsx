@@ -1,6 +1,7 @@
 import { useEffect, useState, type ComponentProps } from 'react'
-import { RotateCcw } from 'lucide-react'
-import type { Settings, SettingsPatch, UpdateCheck } from '../types'
+import { RefreshCw, RotateCcw } from 'lucide-react'
+import { bridge } from '../bridge'
+import type { AudioDevices, Settings, SettingsPatch, UpdateCheck } from '../types'
 import GpuPanel from './GpuPanel'
 import { Button, Modal, Select, Toggle } from './ui'
 
@@ -37,17 +38,43 @@ function keyPlaceholder(source: Settings['anthropic_key_source'], envVar: string
   return 'Not set'
 }
 
+/** Options for a device picker: the Windows default first, then every device; a saved device that is not
+ *  currently plugged in stays selectable so opening Settings never silently changes it. */
+function deviceOptions(names: string[] | undefined, saved: string, def?: string) {
+  const list = names ?? []
+  const opts = [{ value: '', label: def ? `Windows default (${def})` : 'Windows default' }]
+  if (saved && !list.includes(saved)) opts.push({ value: saved, label: `${saved} (not connected)` })
+  return opts.concat(list.map((n) => ({ value: n, label: n })))
+}
+
 export default function SettingsModal({ open, settings, onClose, onSave, onCheckUpdates, gpu }: Props) {
   const [d, setD] = useState<Settings | null>(settings)
   const [saving, setSaving] = useState(false)
   const [clear, setClear] = useState<Record<KeyName, boolean>>({ anthropic: false, openai: false })
 
+  const [devs, setDevs] = useState<AudioDevices | null>(null)
+  const [devsLoading, setDevsLoading] = useState(false)
+  const [devsErr, setDevsErr] = useState('')
+
   const [checking, setChecking] = useState(false)
   const [checkMsg, setCheckMsg] = useState('')
   const [lastCheck, setLastCheck] = useState(0)
 
+  const loadDevices = async () => {
+    setDevsLoading(true)
+    setDevsErr('')
+    try {
+      setDevs(await bridge.listAudioDevices())
+    } catch (e) {
+      setDevsErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDevsLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (open) {
+      void loadDevices()
       setCheckMsg('')
       setLastCheck(settings?.last_update_check ?? 0)
       setD(settings)
@@ -83,6 +110,32 @@ export default function SettingsModal({ open, settings, onClose, onSave, onCheck
         </div>
 
         <div className="space-y-3">
+          <div className="flex items-center">
+            <span className="text-[11px] font-semibold tracking-[0.12em] text-mute uppercase">Audio input</span>
+            <div className="flex-1" />
+            <Button className="h-8 px-3" disabled={devsLoading} icon={<RefreshCw className="size-3.5" />} onClick={loadDevices}>
+              {devsLoading ? 'Scanning…' : 'Refresh'}
+            </Button>
+          </div>
+          <Field label="System audio from">
+            <Select
+              value={d.system_device}
+              onChange={(v) => set('system_device', v)}
+              options={deviceOptions(devs?.speakers, d.system_device, devs?.default_speaker)}
+            />
+          </Field>
+          <Field label="Microphone">
+            <Select
+              value={d.mic_device}
+              onChange={(v) => set('mic_device', v)}
+              options={deviceOptions(devs?.mics, d.mic_device, devs?.default_mic)}
+            />
+          </Field>
+          <p className="text-[12px] text-mute">
+            System audio captures what plays on the chosen output device, so pick the one your meeting app uses
+            (e.g. your headset). Enable each source with the toggles on the main screen.
+          </p>
+          {devsErr && <p className="text-xs text-red-600">Could not list devices: {devsErr}</p>}
           <Field label="Local Whisper model">
             <Select
               value={d.whisper_model}

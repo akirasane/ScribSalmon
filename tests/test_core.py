@@ -231,8 +231,7 @@ def test_backlog_fallback_stops_live_feed_and_transcribes_rest(ctl, wav_file, mo
     c._live_chunk(nid, state, chunk)
     c._live_chunk(nid, state, chunk)
     assert state["fallback"] and len(calls) == 1 and state["fed"] == 1.0
-    assert any("fell behind" in s for s in rec.of("status"))
-    assert not rec.of("error")
+    assert any("fell behind" in s for s in rec.of("error"))
 
     class R:
         def stop(self):
