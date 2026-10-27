@@ -214,6 +214,12 @@ Copy-Item packaging\ScribSalmon.exe.config dist\ScribSalmon\   # lets it run fro
 
 ## Changelog
 
+### 1.5.0
+Audio input device settings.
+
+- **Devices:** Settings -> Audio input lets you pick which output device is captured as system audio (e.g. your headset) and which microphone is used. Both default to the Windows default; a device that is not connected falls back to the default with a warning.
+- **Live transcript:** when transcription falls too far behind (slow model on CPU) and the rest is deferred to Stop, ScribSalmon now says so with a notification instead of a status line that was overwritten within seconds.
+
 ### 1.4.2
 New salmon app icon in a dark variant, used everywhere (exe, installer, taskbar, in-app logo, favicon).
 
